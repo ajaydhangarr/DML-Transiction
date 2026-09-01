@@ -1,0 +1,60 @@
+<template>
+    <template if:true={hasAncestorContext}>
+        <div class="execution-breadcrumb" aria-label="Execution context">
+            <lightning-icon icon-name="utility:hierarchy" size="xx-small"></lightning-icon>
+            <span>Started from:</span>
+            <template for:each={ancestorContext} for:item="context">
+                <span key={context.startNanos} class="breadcrumb-item">{context.label}: {context.name}</span>
+            </template>
+        </div>
+    </template>
+    <template if:true={hasActions}>
+        <div class="tree-container">
+            <template if:true={hasVisibleLimit}>
+                <div class="tree-limit-message" role="status">
+                    Showing the first 1,000 visible nodes. Collapse a branch to inspect more of the tree.
+                </div>
+            </template>
+            <template for:each={processedActions} for:item="action">
+                <div key={action.key} class={action.itemClass} style={action.indentStyle}>
+                    <div class="action-node-header">
+                        <template if:true={action.hasChildren}>
+                            <button class="toggle-btn" data-key={action.key} onclick={handleToggle}>
+                                <lightning-icon icon-name={action.toggleIcon} size="xx-small"></lightning-icon>
+                            </button>
+                        </template>
+                        <template if:false={action.hasChildren}>
+                            <span class="tree-leaf-spacer"></span>
+                        </template>
+
+                        <lightning-icon icon-name={action.iconName} size="x-small" class="node-icon"></lightning-icon>
+
+                        <div class="action-info">
+                            <span class="action-label">{action.label}</span>
+                            <span class="action-name">{action.name}</span>
+                        </div>
+
+                        <div class="action-meta">
+                            <template if:true={action.incomplete}>
+                                <span class="slds-badge slds-theme_warning incomplete-badge">
+                                    <lightning-icon icon-name="utility:warning" size="xx-small"></lightning-icon>
+                                    Incomplete
+                                </span>
+                            </template>
+                            <template if:true={action.eventPhase}>
+                                <span class={action.phaseBadgeClass}>{action.eventPhase}</span>
+                            </template>
+                            <template if:true={action.showTypeBadge}>
+                                <span class={action.badgeClass}>{action.displayType}</span>
+                            </template>
+                            <template if:true={action.durationLabel}>
+                                <span class={action.durationTone}>{action.durationLabel}</span>
+                            </template>
+                        </div>
+                    </div>
+
+                </div>
+            </template>
+        </div>
+    </template>
+</template>

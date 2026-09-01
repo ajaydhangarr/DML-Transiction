@@ -1,0 +1,414 @@
+<template>
+    <iframe
+        class="parser-frame"
+        title="Local log parser"
+        src={parserFrameUrl}
+        onload={handleUploadedParserFrameLoad}
+        onerror={handleUploadedParserFrameError}></iframe>
+    <section class="txn-shell">
+        <section class="toolbar-card">
+            <div class="toolbar-title">
+                <div class="toolbar-heading slds-media slds-media_center">
+                    <div class="slds-media__figure">
+                        <span class="toolbar-icon">
+                            <lightning-icon icon-name="utility:flow" size="small"></lightning-icon>
+                        </span>
+                    </div>
+                    <div class="slds-media__body">
+                        <h1>DML Transaction Visualizer</h1>
+                        <p>Inspect DML operations, execution flow, and field changes.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="filter-bar">
+                <lightning-combobox label="Object" value={filters.objectName} options={objectOptions} data-field="objectName" onchange={handleFilterChange}></lightning-combobox>
+                <lightning-combobox label="Status" value={filters.status} options={statusOptions} data-field="status" onchange={handleFilterChange}></lightning-combobox>
+                <lightning-combobox label="DML Type" value={filters.dmlType} options={dmlOptions} data-field="dmlType" onchange={handleFilterChange}></lightning-combobox>
+                <div class="refresh-action">
+                    <lightning-button label="Refresh" icon-name="utility:refresh" variant="brand" onclick={loadTransactions}></lightning-button>
+                </div>
+            </div>
+            <div class="file-upload-bar">
+                <div>
+                    <label class="file-upload-label" for="debug-log-file">Open local Apex log</label>
+                    <input id="debug-log-file" class="file-upload-input" type="file" accept=".log,.txt,text/plain" onchange={handleFileUpload} />
+                    <p class="file-upload-help">Up to 60 MB. The file stays in this browser and is not sent to Salesforce.</p>
+                </div>
+                <template if:true={uploadFileName}>
+                    <div class={uploadStatusClass} aria-live="polite">
+                        <span>{uploadFileName}</span>
+                        <template if:true={isUploadingFile}>
+                            <span>{uploadProgressLabel}</span>
+                        </template>
+                        <template if:true={uploadMessage}>
+                            <span>{uploadMessage}</span>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </section>
+
+        <template if:true={loading}>
+            <div class="global-loading" role="status" aria-live="polite">
+                <lightning-spinner alternative-text="Loading transaction logs"></lightning-spinner>
+            </div>
+        </template>
+
+        <div class="workspace">
+            <section class="transaction-queue">
+                <div class="queue-header">
+                    <div>
+                        <h2>Transaction Queue</h2>
+                    <p>Recent business DML from Apex debug logs</p>
+                    </div>
+                </div>
+
+                <template if:true={debugLogError}>
+                    <div class="debug-error queue-debug-error" role="alert">
+                        <lightning-icon icon-name="utility:error" size="x-small" variant="inverse"></lightning-icon>
+                        <span>{debugLogError}</span>
+                    </div>
+                </template>
+
+                <template if:true={queueLoading}>
+                    <div class="queue-loading" role="status" aria-live="polite">
+                        <lightning-spinner alternative-text="Checking recent Apex logs for business DML" size="small"></lightning-spinner>
+                    </div>
+                </template>
+
+                <template if:true={hasTransactions}>
+                    <div class="queue-list">
+                        <template for:each={visibleTransactions} for:item="txn">
+                            <article key={txn.Transaction_Id__c} class={txn.itemClass}>
+                                <template if:true={isQueueDeleteMode}>
+                                    <div class="queue-item-select">
+                                    <lightning-input
+                                        type="checkbox"
+                                        variant="label-hidden"
+                                        checked={txn.checked}
+                                        data-id={txn.Transaction_Id__c}
+                                        onchange={handleQueueCheckbox}>
+                                    </lightning-input>
+                                    </div>
+                                </template>
+                                <button class="queue-item-body" data-id={txn.Transaction_Id__c} onclick={handleSelect}>
+                                    <span class="queue-row-top">
+                                        <span class={txn.operationBadgeClass}>{txn.DML_Type__c}</span>
+                                        <span class={txn.badgeClass}>{txn.Status__c}</span>
+                                    </span>
+                                    <span class="queue-title">{txn.cardTitle}</span>
+                                    <span class="queue-time">{txn.displayTime}</span>
+                                    <span class="queue-meta">
+                                        <span>{txn.Triggered_By__c}</span>
+                                        <span>{txn.rowCountLabel}</span>
+                                        <span>{txn.durationLabel}</span>
+                                    </span>
+                                </button>
+                            </article>
+                        </template>
+                    </div>
+                    <template if:true={hasMoreTransactions}>
+                        <div class="queue-load-more">
+                            <lightning-button label="Load more" variant="neutral" onclick={loadMoreQueueRows}></lightning-button>
+                            <span>Showing {visibleTransactions.length} of {transactions.length}</span>
+                        </div>
+                    </template>
+                </template>
+
+                <template if:false={hasTransactions}>
+                    <template if:false={queueLoading}>
+                    <div class="empty-panel">
+                        <lightning-icon icon-name="utility:search" size="small"></lightning-icon>
+                        <h3>{queueEmptyTitle}</h3>
+                        <p>{queueEmptyMessage}</p>
+                    </div>
+                    </template>
+                </template>
+            </section>
+
+                <main class="inspector">
+                    <template if:true={isInspectorBusy}>
+                        <div class="inspector-loading" role="status" aria-live="polite">
+                            <div class="inspector-loading-content">
+                                <lightning-spinner alternative-text="Loading transaction details" size="medium"></lightning-spinner>
+                                <span>Loading transaction details...</span>
+                            </div>
+                        </div>
+                    </template>
+                <template if:true={detail.log}>
+                    <article class="inspector-header">
+                        <div>
+                            <p class="slds-text-title_caps">Selected Transaction</p>
+                            <h2>{detail.log.Object_API_Name__c} {detail.log.DML_Type__c}</h2>
+                            <p class="inspector-time">Execution Time: {detailTimeLabel}</p>
+                            <p class="inspector-id">Log ID: {detail.log.Transaction_Id__c}</p>
+                        </div>
+                        <span class={detailStatusClass}>{detail.log.Status__c}</span>
+                    </article>
+
+                    <template if:true={isFailed}>
+                        <div class="failure-banner" role="alert">
+                            <lightning-icon icon-name="utility:error" size="small" variant="inverse"></lightning-icon>
+                            <div>
+                                <strong>Root cause detected</strong>
+                                <p>{detail.log.Error_Message__c}</p>
+                            </div>
+                        </div>
+                    </template>
+
+                    <template if:true={isLogTruncated}>
+                        <div class="failure-banner slds-theme_warning" role="alert" style="background: rgba(255, 152, 0, 0.2); border-color: #ff9800; margin-top: 0.5rem;">
+                            <lightning-icon icon-name="utility:warning" size="small" variant="warning"></lightning-icon>
+                            <div>
+                                <strong>*** MAXIMUM DEBUG LOG SIZE REACHED ***</strong>
+                                <p>Salesforce truncated this log at its 20 MB limit. Some execution frames may be incomplete.</p>
+                            </div>
+                        </div>
+                    </template>
+
+                    <lightning-tabset variant="scoped" active-tab-value={activeInspectorTab}>
+                        <lightning-tab label="Details" value="details" icon-name="utility:info" onactive={handleInspectorTabActive}>
+                    <section class="selected-overview">
+                        <article class="transaction-context">
+                            <h3>Transaction Details</h3>
+                            <div class="details-section">
+                                <div class="details-group">
+                                    <h4 class="group-title">📦 DML Scope</h4>
+                                    <dl class="details-grid">
+                                        <div>
+                                            <dt>Object</dt>
+                                            <dd>{selectedCardObject}</dd>
+                                        </div>
+                                        <div>
+                                            <dt>Operation</dt>
+                                            <dd><span class={selectedCardOperationClass}>{selectedCardOperation}</span></dd>
+                                        </div>
+                                        <div>
+                                            <dt>Rows Affected</dt>
+                                            <dd>{selectedCardRowCountLabel}</dd>
+                                        </div>
+                                        <template if:true={selectedRecordId}>
+                                            <div>
+                                                <dt>Record ID</dt>
+                                                <dd class="record-id-dd">
+                                                    <a href={selectedRecordUrl} target="_blank" class="record-link">{selectedRecordId}</a>
+                                                    <lightning-button-icon icon-name="utility:copy" size="x-small" title="Copy Record ID" onclick={handleCopyRecordId}></lightning-button-icon>
+                                                </dd>
+                                            </div>
+                                        </template>
+                                    </dl>
+                                </div>
+
+                                <div class="details-group">
+                                    <h4 class="group-title">⚡ Governor Limits</h4>
+                                    <dl class="details-grid">
+                                        <div>
+                                            <dt>SOQL Queries</dt>
+                                            <dd>{governorSoqlLabel}</dd>
+                                        </div>
+                                        <div>
+                                            <dt>DML Statements</dt>
+                                            <dd>{governorDmlLabel}</dd>
+                                        </div>
+                                        <div>
+                                            <dt>CPU Time</dt>
+                                            <dd>{governorCpuLabel}</dd>
+                                        </div>
+                                        <div>
+                                            <dt>Heap Size</dt>
+                                            <dd>{governorHeapLabel}</dd>
+                                        </div>
+                                    </dl>
+                                </div>
+
+                                <div class="details-group">
+                                    <h4 class="group-title">👤 Triggered By</h4>
+                                    <p class="user-name-value">{selectedCardUser}</p>
+                                </div>
+
+                                <div class="details-group">
+                                    <h4 class="group-title">Execution Timing</h4>
+                                    <dl class="details-grid">
+                                        <div>
+                                            <dt>Start Time</dt>
+                                            <dd>{selectedCardStartTime}</dd>
+                                        </div>
+                                        <div>
+                                            <dt>Duration</dt>
+                                            <dd>{selectedCardDuration}</dd>
+                                        </div>
+                                    </dl>
+                                </div>
+                            </div>
+                        </article>
+
+                        <article class={executionHealthClass}>
+                            <div class="section-heading">
+                                <div>
+                                    <p class="slds-text-title_caps">Important Events Only</p>
+                                    <h3>Execution Health</h3>
+                                </div>
+                                <lightning-icon icon-name="utility:checklist" size="small"></lightning-icon>
+                            </div>
+                            <div class="event-list">
+                                <template for:each={importantEvents} for:item="eventItem">
+                                    <article key={eventItem.key} class={eventItem.cardClass}>
+                                        <div class={eventItem.rowClass} data-key={eventItem.key} onclick={handleHealthEventToggle}>
+                                            <lightning-icon icon-name={eventItem.iconName} size="x-small" variant={eventItem.iconVariant}></lightning-icon>
+                                            <div class="event-title-block">
+                                                <strong>{eventItem.label}</strong>
+                                                <p>{eventItem.detail}</p>
+                                            </div>
+                                            <span class={eventItem.badgeClass}>{eventItem.status}</span>
+                                            <lightning-button-icon
+                                                class="event-toggle"
+                                                icon-name={eventItem.toggleIcon}
+                                                alternative-text={eventItem.toggleText}
+                                                title={eventItem.toggleText}
+                                                variant="bare"
+                                                data-key={eventItem.key}
+                                                onclick={handleHealthEventToggle}>
+                                            </lightning-button-icon>
+                                        </div>
+
+                                        <template if:true={eventItem.expanded}>
+                                            <div class={eventItem.detailClass}>
+                                                <template if:true={eventItem.isFailed}>
+                                                    <div class="health-detail-header">
+                                                        <p class="error-detail-text font-bold">{eventItem.errorMessage}</p>
+                                                    </div>
+                                                    <template if:true={eventItem.metrics.length}>
+                                                        <div class="health-metrics-grid slds-m-top_x-small">
+                                                            <template for:each={eventItem.metrics} for:item="metric">
+                                                                <div key={metric.label} class="health-metric-pill">
+                                                                    <span class="health-metric-label">{metric.label}:</span>
+                                                                    <span class="health-metric-value">{metric.value}</span>
+                                                                </div>
+                                                            </template>
+                                                        </div>
+                                                    </template>
+                                                </template>
+
+                                                <template if:true={eventItem.hasOverviewItems}>
+                                                    <div class="health-overview-section">
+                                                        <h5 class="slds-text-title_caps font-bold">Execution Overview</h5>
+                                                        <div class="health-overview-list slds-m-top_xx-small">
+                                                            <template for:each={eventItem.overviewItems} for:item="item">
+                                                                <div key={item.id} class="health-overview-item">
+                                                                    <lightning-icon icon-name={item.icon} size="xx-small" class="item-icon slds-m-right_xx-small"></lightning-icon>
+                                                                    <span class="item-name font-bold">{item.name}</span>
+                                                                    <template if:true={item.info}>
+                                                                        <span class="item-info"> - {item.info}</span>
+                                                                    </template>
+                                                                </div>
+                                                            </template>
+                                                        </div>
+                                                    </div>
+                                                </template>
+
+                                                <template if:true={eventItem.isFailed}>
+                                                    <template if:true={eventItem.hasActions}>
+                                                        <div class="health-actions-section slds-m-top_small">
+                                                            <h5 class="slds-text-title_caps font-bold">Suggested Actions</h5>
+                                                            <ul class="slds-list_dotted slds-m-top_xx-small">
+                                                                <template for:each={eventItem.actions} for:item="action">
+                                                                    <li key={action.key}>{action.text}</li>
+                                                                </template>
+                                                            </ul>
+                                                        </div>
+                                                    </template>
+                                                </template>
+                                            </div>
+                                        </template>
+                                    </article>
+                                </template>
+                            </div>
+                        </article>
+                    </section>
+
+                        </lightning-tab>
+                        <lightning-tab label="Execution Tree" value="tree" icon-name="utility:hierarchy" onactive={handleInspectorTabActive}>
+                            <template if:true={isExecutionTreeTabActive}>
+                            <template if:true={treeRenderTimedOut}>
+                                <div class="empty-panel slim">The execution tree took too long to render. Select this transaction again to retry.</div>
+                            </template>
+                            <template if:false={treeRenderTimedOut}>
+                                <template if:true={selectedCardHasActions}>
+                                    <div class="tree-controls-bar slds-m-bottom_small slds-grid slds-grid_vertical-align-center slds-grid_align-spread">
+                                        <div class="slds-button-group" role="group">
+                                            <button class="slds-button slds-button_neutral slds-button_small" onclick={handleCollapseAll}>
+                                                <lightning-icon icon-name="utility:collapse_all" size="x-small" class="slds-m-right_xx-small"></lightning-icon>
+                                                Collapse All
+                                            </button>
+                                        </div>
+                                        <div class="slds-form-element">
+                                            <label class="slds-checkbox_toggle slds-grid">
+                                                <span class="slds-form-element__label slds-m-right_x-small font-bold">Debug Only</span>
+                                                <input type="checkbox" name="debugOnlyToggle" checked={isDebugOnly} onchange={handleDebugOnlyToggle} />
+                                                <span class="slds-checkbox_faux_container" aria-live="assertive">
+                                                    <span class="slds-checkbox_faux"></span>
+                                                    <span class="slds-checkbox_on">ON</span>
+                                                    <span class="slds-checkbox_off">OFF</span>
+                                                </span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <c-dml-action-tree actions={displayActions} ancestor-context={selectedCardAncestorContext} render-token={activeTreeRenderToken} expand-state={expandState} ontreeready={handleTreeReady}></c-dml-action-tree>
+                                </template>
+                                <template if:false={selectedCardHasActions}>
+                                    <div class="empty-panel slim">No nested execution actions were captured for this DML operation.</div>
+                                </template>
+                            </template>
+                            </template>
+                        </lightning-tab>
+                        <lightning-tab label="Field Changes" value="fields" icon-name="utility:record" onactive={handleInspectorTabActive}>
+                            <template if:true={hasFieldChanges}>
+                                <div class="field-changes-container">
+                                    <div class="field-group-pagination">
+                                        <lightning-button label="Previous" icon-name="utility:chevronleft" onclick={previousFieldGroupPage} disabled={isFirstFieldGroupPage}></lightning-button>
+                                        <span>{fieldGroupPageLabel}</span>
+                                        <lightning-button label="Next" icon-name="utility:chevronright" icon-position="right" onclick={nextFieldGroupPage} disabled={isLastFieldGroupPage}></lightning-button>
+                                    </div>
+                                    <template if:true={selectedFieldChangesGroup}>
+                                        <article class="field-group-card field-group-detail-card">
+                                            <div class="field-group-header">
+                                                <div class="field-group-title">
+                                                    <lightning-icon icon-name="utility:topic" size="x-small" class="object-icon"></lightning-icon>
+                                                    <span class="object-badge">{selectedFieldChangesGroup.objectName}</span>
+                                                    <template if:true={selectedFieldChangesGroup.isRealId}>
+                                                        <a href={selectedFieldChangesGroup.recordUrl} target="_blank" class="record-id-link">{selectedFieldChangesGroup.recordId}</a>
+                                                    </template>
+                                                    <template if:false={selectedFieldChangesGroup.isRealId}>
+                                                        <span class="record-id-text">{selectedFieldChangesGroup.recordId}</span>
+                                                    </template>
+                                                </div>
+                                                <span class="count-tag">{selectedFieldChangesGroup.fieldCount} Field Change(s)</span>
+                                            </div>
+                                            <lightning-datatable
+                                                key-field="Id"
+                                                data={selectedFieldChangesGroup.changes}
+                                                columns={fieldColumns}
+                                                hide-checkbox-column>
+                                            </lightning-datatable>
+                                        </article>
+                                    </template>
+                                </div>
+                            </template>
+                            <template if:false={hasFieldChanges}>
+                                <div class="empty-panel slim">{fieldChangesEmptyMessage}</div>
+                            </template>
+                        </lightning-tab>
+                    </lightning-tabset>
+                </template>
+
+                <template if:false={detail.log}>
+                    <div class="empty-panel inspector-empty">
+                        <lightning-icon icon-name="utility:trail" size="medium"></lightning-icon>
+                        <h2>Select a transaction</h2>
+                        <p>Choose a row from the queue to inspect its execution map and field-level changes.</p>
+                    </div>
+                </template>
+            </main>
+        </div>
+    </section>
+</template>

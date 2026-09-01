@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>TXN_Step__c</fullName>
+    <label>TXN Step</label>
+    <referenceTo>TXN_Step__c</referenceTo>
+    <relationshipLabel>TXN Field Changes</relationshipLabel>
+    <relationshipName>TXN_Field_Changes</relationshipName>
+    <relationshipOrder>0</relationshipOrder>
+    <reparentableMasterDetail>false</reparentableMasterDetail>
+    <trackTrending>false</trackTrending>
+    <type>MasterDetail</type>
+    <writeRequiresMasterRead>false</writeRequiresMasterRead>
+</CustomField>
