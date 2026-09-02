@@ -3,9 +3,11 @@
     <fullName>Status__c</fullName>
     <label>Status</label>
     <required>true</required>
+    <trackTrending>false</trackTrending>
     <type>Picklist</type>
     <valueSet>
         <valueSetDefinition>
+            <sorted>false</sorted>
             <value>
                 <fullName>Pending</fullName>
                 <default>true</default>

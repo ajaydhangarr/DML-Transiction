@@ -3,6 +3,7 @@
     <fullName>DmlSummaryJson__c</fullName>
     <label>DML Summary JSON</label>
     <length>131072</length>
+    <trackTrending>false</trackTrending>
     <type>LongTextArea</type>
     <visibleLines>10</visibleLines>
 </CustomField>

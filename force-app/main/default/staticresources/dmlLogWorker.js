@@ -1,3 +1,4 @@
+/* global self */
 const BEGIN_END_MAP = {
   DML_BEGIN: 'DML_END',
   CODE_UNIT_STARTED: 'CODE_UNIT_FINISHED',
@@ -72,7 +73,7 @@ function durationInMs(startNanos, endNanos) {
   return ((endNanos - startNanos) / 1000000).toFixed(2);
 }
 
-export function buildExecutionTree(rawLog) {
+function buildExecutionTree(rawLog) {
   if (!rawLog) {
     return { type: 'ROOT', children: [], isTruncated: false };
   }
@@ -139,17 +140,12 @@ export function buildExecutionTree(rawLog) {
     stack[index].incomplete = true;
   }
 
-  captureUiSaveCandidates(root);
   pruneEmptyNodes(root);
   return root;
 }
 
 function yieldToBrowser() {
-  return new Promise((resolve) => {
-    // Chunked parsing intentionally yields between batches to keep the UI responsive.
-    // eslint-disable-next-line @lwc/lwc/no-async-operation
-    setTimeout(resolve, 0);
-  });
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function throwIfAborted(signal) {
@@ -164,7 +160,7 @@ function throwIfAborted(signal) {
  * Chunked variant used by the LWC for large logs. The synchronous version is
  * intentionally kept for the parser unit tests and small callers.
  */
-export async function buildExecutionTreeAsync(rawLog, options = {}) {
+async function buildExecutionTreeAsync(rawLog, options = {}) {
   if (!rawLog) {
     return { type: 'ROOT', children: [], isTruncated: false };
   }
@@ -233,8 +229,6 @@ export async function buildExecutionTreeAsync(rawLog, options = {}) {
       options.onProgress(end / lines.length);
     }
     if (end < lines.length) {
-      // Chunk boundaries are intentionally processed sequentially.
-      // eslint-disable-next-line no-await-in-loop
       await yieldToBrowser();
       throwIfAborted(options.signal);
     }
@@ -244,14 +238,13 @@ export async function buildExecutionTreeAsync(rawLog, options = {}) {
     stack[index].incomplete = true;
     stack[index].endLine = lines.length - 1;
   }
-  captureUiSaveCandidates(root);
   pruneEmptyNodes(root);
   return root;
 }
 
 // File-upload parser. It keeps only the current partial line between chunks,
 // so callers do not need to split a multi-megabyte file into one giant array.
-export function createExecutionTreeStreamState() {
+function createExecutionTreeStreamState() {
   return {
     root: { type: 'ROOT', children: [], isTruncated: false },
     stack: null,
@@ -309,7 +302,7 @@ function consumeExecutionTreeLine(state, rawLine) {
   if (Object.prototype.hasOwnProperty.call(BEGIN_END_MAP, eventType)) state.stack.push(node);
 }
 
-export function consumeExecutionTreeStream(state, chunkText, isFinal = false) {
+function consumeExecutionTreeStream(state, chunkText, isFinal = false) {
   if (!state.stack) state.stack = [state.root];
   const text = `${state.carry || ''}${chunkText || ''}`;
   const lines = text.split(/\r?\n/);
@@ -327,14 +320,13 @@ export function consumeExecutionTreeStream(state, chunkText, isFinal = false) {
   return state;
 }
 
-export function finishExecutionTreeStream(state) {
+function finishExecutionTreeStream(state) {
   if (!state.stack) state.stack = [state.root];
   if (state.carry) consumeExecutionTreeStream(state, '', true);
   for (let index = 1; index < state.stack.length; index += 1) {
     state.stack[index].incomplete = true;
     state.stack[index].endLine = Math.max(0, state.lineIndex - 1);
   }
-  captureUiSaveCandidates(state.root);
   pruneEmptyNodes(state.root);
   return state.root;
 }
@@ -349,19 +341,11 @@ const WORK_EVENT_TYPES = new Set([
   'USER_DEBUG',
   'EXCEPTION_THROWN',
   'FATAL_ERROR',
-  // Keep successful automation evidence so it remains visible in the
-  // selected DML tree. Error-only retention would hide passing rules.
-  'VALIDATION_RULE',
-  'VALIDATION_PASS',
   'VALIDATION_FAIL',
-  'WF_FIELD_UPDATE',
-  'WF_RULE_EVAL_BEGIN',
-  'WF_CRITERIA_BEGIN',
-  'WF_RULE_FILTER',
-  'WF_FLOW_ACTION_BEGIN'
+  'WF_FIELD_UPDATE'
 ]);
 
-export function pruneEmptyNodes(node) {
+function pruneEmptyNodes(node) {
   if (!node) return null;
 
   if (node.children && node.children.length > 0) {
@@ -437,7 +421,7 @@ function statusFor(node) {
   return treeHasError(node) ? 'Failed' : 'Success';
 }
 
-export function isInternalLoggingObject(objectName) {
+function isInternalLoggingObject(objectName) {
   if (!objectName) return true;
   const name = String(objectName).trim();
   if (SYSTEM_METADATA_OBJECTS.has(name)) return true;
@@ -496,13 +480,12 @@ function cardFromNode(node, cardIndex, fields, ancestors = [], rootNode = null, 
   const relatedErrors = findRelatedErrors(rootNode, node, errorIndex);
   const directActions = summarizeChildren(node.children || [], id, 1);
   const automationActions = summarizePostSaveAutomation(fields.relatedAutomationNodes || [], id);
-  const nodeHasError = treeHasError(node);
-  const unhandledErrors = nodeHasError ? [] : relatedErrors;
+  const unhandledErrors = relatedErrors.filter((err) => !treeHasError(node));
   const errorActions = summarizeChildren(unhandledErrors, id, 1);
   const actions = [...directActions, ...errorActions, ...automationActions];
   const durationMs = durationInMs(node.startNanos, node.endNanos);
   const contextEvents = executionContextFrom(ancestors);
-  const hasErr = relatedErrors.length > 0 || nodeHasError;
+  const hasErr = relatedErrors.length > 0 || treeHasError(node);
 
   return {
     id,
@@ -511,7 +494,7 @@ function cardFromNode(node, cardIndex, fields, ancestors = [], rootNode = null, 
     Object_API_Name__c: fields.objectName,
     DML_Type__c: fields.operation,
     rowCount: fields.rowCount || 1,
-    Status__c: hasErr ? 'Failed' : statusFor(node),
+    Status__c: hasErr ? 'Failed' : 'Success',
     Error_Message__c: relatedErrors[0]?.detail || null,
     durationMs,
     durationLabel: durationMs ? `${durationMs} ms` : 'N/A',
@@ -565,8 +548,6 @@ async function walkTreeAsync(node, visitor, options = {}) {
     }
 
     if (visited % yieldEvery === 0 && stack.length) {
-      // Tree traversal is intentionally chunked and sequential so cancellation can be checked.
-      // eslint-disable-next-line no-await-in-loop
       await yieldToBrowser();
       throwIfAborted(options.signal);
     }
@@ -621,45 +602,7 @@ function relatedPostSaveAutomation(rootNode, triggerNode) {
   return automationNodes;
 }
 
-function cloneInferenceNode(node) {
-  return {
-    ...node,
-    children: (node.children || []).map((child) => cloneInferenceNode(child))
-  };
-}
-
-function captureUiSaveCandidates(rootNode) {
-  const candidates = [];
-  walkTree(rootNode, (node) => {
-    if (!isBusinessTriggerNode(node)) return;
-    const triggerMatch = String(node.detail || '').match(/\bon\s+([A-Za-z0-9_]+)\s+trigger\s+event\s+([A-Za-z0-9_]+)/i);
-    if (!triggerMatch || isInternalLoggingObject(triggerMatch[1])) return;
-    candidates.push({
-      triggerNode: node,
-      relatedAutomationNodes: relatedPostSaveAutomation(rootNode, node).map((candidate) => cloneInferenceNode(candidate))
-    });
-  });
-  rootNode.inferredUiSaveCandidates = candidates;
-}
-
 function findInferredUiCard(rootNode, cardIndex) {
-  const savedCandidates = rootNode?.inferredUiSaveCandidates || [];
-  if (savedCandidates.length > 0) {
-    const candidate = savedCandidates[0];
-    const triggerMatch = String(candidate.triggerNode?.detail || '').match(/\bon\s+([A-Za-z0-9_]+)\s+trigger\s+event\s+([A-Za-z0-9_]+)/i);
-    if (triggerMatch && !isInternalLoggingObject(triggerMatch[1])) {
-      return cardFromNode(candidate.triggerNode, cardIndex, {
-        kind: 'trigger',
-        objectName: triggerMatch[1],
-        operation: operationFromTriggerEvent(triggerMatch[2]),
-        rowCount: 1,
-        isInferred: true,
-        inferenceReason: 'Derived from Trigger event execution in Lightning UI.',
-        relatedAutomationNodes: candidate.relatedAutomationNodes
-      });
-    }
-  }
-
   let triggerNode;
   let triggerObject;
   let triggerOperation;
@@ -695,7 +638,7 @@ function findInferredUiCard(rootNode, cardIndex) {
   return null;
 }
 
-export async function extractDmlCardResult(rootNode, options = { includeInferredUiSaves: true }) {
+async function extractDmlCardResult(rootNode, options = { includeInferredUiSaves: true }) {
   if (!rootNode?.children) {
     return { cards: [], confirmedDmlCount: 0, internalDmlCount: 0 };
   }
@@ -758,11 +701,21 @@ const OBJECT_KEY_PREFIXES = {
   User: '005'
 };
 
-const REVERSE_PREFIX_MAP = Object.fromEntries(
-  Object.entries(OBJECT_KEY_PREFIXES).map(([objectName, prefix]) => [prefix, objectName])
-);
+const REVERSE_PREFIX_MAP = {
+  '001': 'Account',
+  '003': 'Contact',
+  '006': 'Opportunity',
+  '00Q': 'Lead',
+  '00T': 'Task',
+  '500': 'Case',
+  '02i': 'Asset',
+  '701': 'Campaign',
+  '800': 'Contract',
+  '801': 'Order',
+  '005': 'User'
+};
 
-function getObjectFromIdOrVar(recordId, varName) {
+function getObjectFromIdOrVar(recordId, varName, dmlScope) {
   if (recordId && recordId.length >= 3) {
     const prefix = recordId.substring(0, 3);
     if (REVERSE_PREFIX_MAP[prefix]) {
@@ -784,7 +737,7 @@ function getObjectFromIdOrVar(recordId, varName) {
   return null;
 }
 
-export function getScopedLogLines(rawLog, dmlScope = null) {
+function getScopedLogLines(rawLog, dmlScope = null) {
   const text = String(rawLog || '');
   const startLine = Number.isFinite(dmlScope?.startLine) ? Math.max(0, dmlScope.startLine) : null;
   const endLine = Number.isFinite(dmlScope?.endLine) ? Math.max(startLine ?? 0, dmlScope.endLine) : null;
@@ -809,7 +762,7 @@ export function getScopedLogLines(rawLog, dmlScope = null) {
   return lines;
 }
 
-export async function extractFieldChangesFromDebugLog(rawLog, dmlScope = null, options = {}) {
+async function extractFieldChangesFromDebugLog(rawLog, dmlScope = null, options = {}) {
   if (!rawLog) return { groups: [], flat: [] };
 
   const lines = getScopedLogLines(rawLog, dmlScope);
@@ -906,8 +859,6 @@ export async function extractFieldChangesFromDebugLog(rawLog, dmlScope = null, o
     const { rawLine, lineIndex } = lines[lineOffset];
     if (lineOffset % 250 === 0) throwIfAborted(options.signal);
     if (lineOffset > 0 && lineOffset % 500 === 0) {
-      // Field-change parsing is intentionally chunked and sequential.
-      // eslint-disable-next-line no-await-in-loop
       await yieldToBrowser();
       throwIfAborted(options.signal);
     }
@@ -951,7 +902,7 @@ export async function extractFieldChangesFromDebugLog(rawLog, dmlScope = null, o
               const typeStr = typeof val === 'number' ? 'Number' : typeof val === 'boolean' ? 'Boolean' : 'String';
               addFieldChange(objName, recId, field, oldStr, valStr, typeStr);
             });
-          } catch {
+          } catch (e) {
             // Ignore non-json
           }
         } else if (varName.includes('.')) {
@@ -979,48 +930,17 @@ export async function extractFieldChangesFromDebugLog(rawLog, dmlScope = null, o
   return { groups, flat, defaultStep: flat };
 }
 
-export async function extractDmlCards(rootNode, options = { includeInferredUiSaves: true }) {
+async function extractDmlCards(rootNode, options = { includeInferredUiSaves: true }) {
   const result = await extractDmlCardResult(rootNode, options);
   return result.cards;
 }
 
-function parseValidationEventDetails(type, detail, previousRuleName = null) {
-  const segments = String(detail || '')
-    .split('|')
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-    .filter((segment) => !/^\[?\d+\]?$/.test(segment));
-  const status = type === 'VALIDATION_PASS'
-    ? 'Passed'
-    : type === 'VALIDATION_FAIL'
-      ? 'Failed'
-      : 'Evaluated';
-  const statusPattern = /^(?:validation\s+)?(?:passed|pass|failed|fail|error|formula\s+evaluated)$/i;
-  const nameSegment = segments.find((segment) => {
-    if (statusPattern.test(segment)) return false;
-    if (type === 'VALIDATION_RULE') return true;
-    return /^[A-Za-z][A-Za-z0-9 _-]*\s*:\s*\S/.test(segment);
-  });
-  let ruleName = nameSegment || previousRuleName || null;
-  if (nameSegment && nameSegment.includes(':')) {
-    const qualifiedName = nameSegment.split(':').slice(1).join(':').trim();
-    if (qualifiedName) ruleName = qualifiedName;
-  }
-  const detailSegments = segments.filter((segment) => segment !== nameSegment);
-  return {
-    ruleName,
-    status,
-    detail: detailSegments.join(' | ') || null
-  };
-}
-
-export function summarizeChildren(children, parentId = 'root', depth = 1, previousValidationRule = null) {
+function summarizeChildren(children, parentId = 'root', depth = 1) {
   if (!children?.length) {
     return [];
   }
 
   const displayChildren = aggregateRepeatedActions(children);
-  let lastValidationRule = previousValidationRule;
 
   return displayChildren.map((entry, idx) => {
     const c = entry.node;
@@ -1106,33 +1026,12 @@ export function summarizeChildren(children, parentId = 'root', depth = 1, previo
       case 'VALIDATION_RULE':
       case 'VALIDATION_PASS':
       case 'VALIDATION_FAIL':
-        {
-          const validation = parseValidationEventDetails(c.type, c.detail, lastValidationRule);
-          if (validation.ruleName) lastValidationRule = validation.ruleName;
-          base.validationRuleName = validation.ruleName;
-          base.validationStatus = validation.status;
-          base.validationDetail = validation.detail;
-          base.label = 'Validation Rule';
-          base.name = validation.ruleName
-            ? `${validation.ruleName}${validation.detail ? ` — ${validation.detail}` : ''}`
-            : (validation.detail || 'Validation rule name unavailable');
-          break;
-        }
+        base.label = 'Validation Rule';
+        base.name = c.detail.split('|').pop();
+        break;
       case 'WF_FIELD_UPDATE':
       case 'WF_RULE_EVAL_BEGIN':
         base.label = 'Workflow Update';
-        base.name = c.detail.split('|').pop();
-        break;
-      case 'WF_CRITERIA_BEGIN':
-        base.label = 'Workflow Criteria';
-        base.name = c.detail.split('|').pop();
-        break;
-      case 'WF_RULE_FILTER':
-        base.label = 'Workflow Filter';
-        base.name = c.detail.split('|').pop();
-        break;
-      case 'WF_FLOW_ACTION_BEGIN':
-        base.label = 'Workflow Action';
         base.name = c.detail.split('|').pop();
         break;
       case 'EXCEPTION_THROWN':
@@ -1151,7 +1050,7 @@ export function summarizeChildren(children, parentId = 'root', depth = 1, previo
     }
 
     if (hasChildren) {
-      base.children = summarizeChildren(c.children, nodeId, depth + 1, lastValidationRule);
+      base.children = summarizeChildren(c.children, nodeId, depth + 1);
     }
     return base;
   });
@@ -1232,3 +1131,477 @@ function getIconName(type) {
   if (type.includes('EXCEPTION') || type.includes('ERROR')) return 'utility:error';
   return 'utility:chevronright';
 }
+
+
+
+const WORKER_MAX_SCOPE_BYTES = 10000000;
+const workerCancelledRequests = new Set();
+let workerActiveFile = null;
+
+function workerSend(type, requestId, payload = {}) {
+    self.postMessage({ type, requestId, ...payload });
+}
+
+function workerCheckCancelled(requestId) {
+    if (workerCancelledRequests.has(requestId)) {
+        const error = new Error('Parsing cancelled.');
+        error.name = 'AbortError';
+        throw error;
+    }
+}
+
+function workerSignal(requestId) {
+    return {
+        get aborted() {
+            return workerCancelledRequests.has(requestId);
+        }
+    };
+}
+
+function workerContextFrom(stack) {
+    return stack
+        .filter((frame) => frame.type === 'CODE_UNIT_STARTED' || frame.type.includes('FLOW'))
+        .map((frame) => ({
+            type: frame.type,
+            detail: frame.detail,
+            timestampStr: frame.timestampStr,
+            startNanos: frame.startNanos,
+            label: frame.type === 'CODE_UNIT_STARTED'
+                ? (String(frame.detail || '').includes('trigger') ? 'Trigger' : 'Apex Code Unit')
+                : 'Flow Action',
+            name: String(frame.detail || '').split('|').pop() || frame.detail || 'Unknown context'
+        }));
+}
+
+function workerMakeLineProcessor(onLine) {
+    const encoder = new TextEncoder();
+    let carry = '';
+    let lineIndex = 0;
+    let lineStartByte = 0;
+
+    function processLine(line, hasNewline) {
+        const byteLength = encoder.encode(line + (hasNewline ? '\n' : '')).length;
+        const endByte = lineStartByte + byteLength;
+        onLine(line.endsWith('\r') ? line.slice(0, -1) : line, lineIndex, lineStartByte, endByte);
+        lineStartByte = endByte;
+        lineIndex += 1;
+    }
+
+    return {
+        push(text, isFinal = false) {
+            const combined = carry + (text || '');
+            const lines = combined.split('\n');
+            if (!isFinal) carry = lines.pop() || '';
+            else carry = '';
+            lines.forEach((line, index) => {
+                const hasNewline = !isFinal || index < lines.length - 1 || combined.endsWith('\n');
+                processLine(line, hasNewline);
+            });
+        },
+        finish() {
+            if (carry) {
+                processLine(carry, false);
+                carry = '';
+            }
+            return { lineIndex, byteLength: lineStartByte };
+        }
+    };
+}
+
+function workerCompleteDmlFrame(state, frame, endNanos, endLine, endByte, incomplete) {
+    const dml = frame.dml;
+    if (!dml || dml.completed) return;
+    dml.completed = true;
+    dml.endNanos = endNanos;
+    dml.endLine = endLine;
+    dml.endByte = endByte;
+    dml.incomplete = Boolean(incomplete);
+    if (isInternalLoggingObject(dml.objectName)) {
+        state.internalDmlCount += 1;
+        return;
+    }
+    state.cards.push({
+        objectName: dml.objectName,
+        operation: dml.operation,
+        rows: dml.rowCount,
+        status: dml.error ? 'Failed' : 'Success',
+        timestamp: dml.timestampStr,
+        startNanos: dml.startNanos,
+        endNanos: dml.endNanos,
+        startLine: dml.startLine,
+        endLine: dml.endLine,
+        startByte: dml.startByte,
+        endByte: dml.endByte,
+        isTruncated: state.truncated || dml.incomplete,
+        contextEvents: dml.contextEvents
+    });
+}
+
+function workerConsumeIndexLine(state, rawLine, lineIndex, startByte, endByte) {
+    if (!rawLine || !rawLine.trim()) return;
+    if (rawLine.includes('*** MAXIMUM DEBUG LOG SIZE REACHED ***')) state.truncated = true;
+    const parts = rawLine.split('|');
+    if (parts.length < 2) return;
+
+    const eventType = parts[1].trim();
+    const detail = parts.slice(2).join('|');
+    const eventNanos = parseTimestampNanos(parts[0]);
+    const timestampStr = parseTimestampString(parts[0]);
+    const closingEvents = Object.values(BEGIN_END_MAP);
+
+    if (closingEvents.includes(eventType)) {
+        let matchIndex = -1;
+        for (let index = state.stack.length - 1; index >= 0; index -= 1) {
+            if (BEGIN_END_MAP[state.stack[index].type] === eventType) {
+                matchIndex = index;
+                break;
+            }
+        }
+        if (matchIndex === -1) return;
+        for (let index = state.stack.length - 1; index >= matchIndex; index -= 1) {
+            workerCompleteDmlFrame(state, state.stack[index], eventNanos, lineIndex, endByte, index !== matchIndex);
+        }
+        state.stack.length = matchIndex;
+        return;
+    }
+
+    const isBegin = Object.prototype.hasOwnProperty.call(BEGIN_END_MAP, eventType);
+    if (!isBegin && !SINGLE_LINE_EVENTS.has(eventType)) return;
+
+    if (isErrorEvent(eventType)) {
+        for (let index = state.stack.length - 1; index >= 0; index -= 1) {
+            if (state.stack[index].dml) {
+                state.stack[index].dml.error = true;
+                break;
+            }
+        }
+    }
+
+    if (!isBegin) return;
+    const frame = { type: eventType, detail, startNanos: eventNanos, timestampStr };
+    if (eventType === 'DML_BEGIN') {
+        const details = extractDmlOpDetails(detail);
+        state.confirmedDmlCount += 1;
+        frame.dml = {
+            ...details,
+            timestampStr,
+            startNanos: eventNanos,
+            endNanos: null,
+            startLine: lineIndex,
+            endLine: null,
+            startByte,
+            endByte: null,
+            error: false,
+            incomplete: false,
+            contextEvents: workerContextFrom(state.stack)
+        };
+    }
+    state.stack.push(frame);
+}
+
+async function workerIndexFile(requestId, file) {
+    if (!file || typeof file.size !== 'number') {
+        throw new Error('The selected file could not be read by the parser worker.');
+    }
+    workerActiveFile = file;
+    const state = {
+        stack: [],
+        cards: [],
+        confirmedDmlCount: 0,
+        internalDmlCount: 0,
+        truncated: false
+    };
+    const decoder = new TextDecoder('utf-8');
+    const processor = workerMakeLineProcessor((line, lineIndex, startByte, endByte) => {
+        workerConsumeIndexLine(state, line, lineIndex, startByte, endByte);
+    });
+
+    if (file.size === 0) processor.push('', true);
+    for (let offset = 0; offset < file.size; offset += 512000) {
+        workerCheckCancelled(requestId);
+        const end = Math.min(offset + 512000, file.size);
+        const isFinal = end >= file.size;
+        const buffer = await file.slice(offset, end).arrayBuffer();
+        const text = decoder.decode(buffer, { stream: !isFinal });
+        processor.push(text, isFinal);
+        workerSend('PROGRESS', requestId, {
+            phase: 'indexing',
+            progress: file.size ? end / file.size : 1
+        });
+    }
+    const lineInfo = processor.finish();
+
+    for (let index = state.stack.length - 1; index >= 0; index -= 1) {
+        workerCompleteDmlFrame(
+            state,
+            state.stack[index],
+            null,
+            Math.max(0, lineInfo.lineIndex - 1),
+            file.size,
+            true
+        );
+    }
+    state.cards.sort((left, right) => (left.startLine || 0) - (right.startLine || 0));
+    state.cards.forEach((card, index) => { card.dmlIndex = index; });
+
+    return {
+        fileSize: file.size,
+        lineCount: lineInfo.lineIndex,
+        cards: state.cards,
+        confirmedDmlCount: state.confirmedDmlCount,
+        internalDmlCount: state.internalDmlCount,
+        isTruncated: state.truncated
+    };
+}
+
+function workerIsWithinDmlScope(timestampNanos, dmlScope) {
+    if (!Number.isFinite(dmlScope?.startNanos)) return true;
+    if (!Number.isFinite(timestampNanos)) return false;
+    return timestampNanos >= dmlScope.startNanos &&
+        (!Number.isFinite(dmlScope.endNanos) || timestampNanos <= dmlScope.endNanos);
+}
+
+function workerExtractDebugValue(text, key) {
+    return String(text || '').match(new RegExp(key + ':([^|]+)', 'i'))?.[1]?.trim();
+}
+
+function workerCleanDebugMarker(marker) {
+    return (marker || 'Debug Event').replace(/_/g, ' ');
+}
+
+function workerCleanDebugDetail(details) {
+    return (details || '').replace(/\s+/g, ' ').trim() || '-';
+}
+
+function workerExtractDmlEvent(marker, details, dmlScope) {
+    const isStart = marker === 'DML_BEGIN';
+    const operation = workerExtractDebugValue(details, 'Op') || dmlScope?.operation || 'DML';
+    const objectApiName = workerExtractDebugValue(details, 'Type') || dmlScope?.objectName || 'Unknown Object';
+    const rows = workerExtractDebugValue(details, 'Rows') || dmlScope?.rowCount;
+    return {
+        type: 'DML',
+        severity: 'info',
+        iconName: 'utility:database',
+        title: operation + ' ' + objectApiName + (isStart ? ' started' : ' completed'),
+        detail: rows ? rows + ' row(s) affected' : workerCleanDebugDetail(details)
+    };
+}
+
+function workerExtractSoqlDetail(details) {
+    const entities = workerExtractDebugValue(details, 'Aggregations') || workerExtractDebugValue(details, 'Rows');
+    const query = String(details || '').match(/SELECT\s+.+/i)?.[0];
+    if (query) return query;
+    return entities ? 'Rows: ' + entities : workerCleanDebugDetail(details);
+}
+
+function workerExtractFlowDetail(details) {
+    const flowName = String(details || '').match(/Interview Label:\s*([^|]+)/i)?.[1] ||
+        String(details || '').match(/Flow:\s*([^|]+)/i)?.[1];
+    return flowName ? flowName.trim() : workerCleanDebugDetail(details);
+}
+
+function workerExtractCodeUnitDetail(details) {
+    const triggerMatch = String(details || '').match(/__sfdc_trigger\/([^:|]+)/i);
+    const apexMatch = String(details || '').match(/apex:\/\/([^:|]+)/i);
+    if (triggerMatch) return 'Trigger: ' + triggerMatch[1];
+    if (apexMatch) return 'Apex: ' + apexMatch[1];
+    return workerCleanDebugDetail(details);
+}
+
+async function workerParseDebugEvents(rawLog, dmlScope, requestId) {
+    const contextLines = (dmlScope?.contextEvents || []).map((contextEvent) => ({
+        line: (contextEvent.timestampStr || '-') + ' (' + (contextEvent.startNanos || 0) + ')|' +
+            contextEvent.type + '|' + (contextEvent.detail || ''),
+        isContext: true
+    }));
+    const logLines = getScopedLogLines(rawLog, dmlScope).map(({ rawLine, lineIndex }) => ({
+        line: rawLine,
+        lineIndex,
+        isContext: false
+    }));
+    const hasDmlScope = Number.isFinite(dmlScope?.startNanos);
+    const lines = [...contextLines, ...logLines];
+    const events = [];
+    let counter = 0;
+
+    for (let start = 0; start < lines.length; start += 1000) {
+        workerCheckCancelled(requestId);
+        const end = Math.min(start + 1000, lines.length);
+        lines.slice(start, end).forEach(({ line, lineIndex, isContext }) => {
+            const timestampNanos = parseTimestampNanos(line);
+            if (!isContext && Number.isFinite(dmlScope?.startLine) && lineIndex < dmlScope.startLine) return;
+            if (!isContext && Number.isFinite(dmlScope?.endLine) && lineIndex > dmlScope.endLine) return;
+            if (!isContext && hasDmlScope && !workerIsWithinDmlScope(timestampNanos, dmlScope)) return;
+
+            const parts = line.split('|');
+            const marker = parts.length > 1 ? parts[1] : line;
+            const details = parts.slice(2).join(' | ') || line;
+            let eventConfig;
+            if (line.includes('FATAL_ERROR') || line.includes('EXCEPTION_THROWN')) {
+                eventConfig = {
+                    type: 'Error',
+                    severity: 'error',
+                    iconName: 'utility:error',
+                    title: workerCleanDebugMarker(marker),
+                    detail: workerCleanDebugDetail(details)
+                };
+            } else if (line.includes('FLOW_')) {
+                eventConfig = {
+                    type: 'Flow',
+                    severity: /ERROR|FAULT/i.test(line) ? 'error' : 'info',
+                    iconName: 'utility:flow',
+                    title: workerCleanDebugMarker(marker),
+                    detail: workerExtractFlowDetail(details)
+                };
+            } else if (line.includes('DML_BEGIN') || line.includes('DML_END')) {
+                eventConfig = workerExtractDmlEvent(marker, details, dmlScope);
+            } else if (line.includes('SOQL_EXECUTE_') || line.includes('SOSL_EXECUTE_')) {
+                eventConfig = {
+                    type: line.includes('SOSL_') ? 'SOSL' : 'SOQL',
+                    severity: 'info',
+                    iconName: 'utility:search',
+                    title: workerCleanDebugMarker(marker),
+                    detail: workerExtractSoqlDetail(details)
+                };
+            } else if (line.includes('VALIDATION_') || /FIELD_CUSTOM_VALIDATION_EXCEPTION|REQUIRED_FIELD_MISSING/i.test(line)) {
+                eventConfig = {
+                    type: 'Validation',
+                    severity: 'warning',
+                    iconName: 'utility:warning',
+                    title: workerCleanDebugMarker(marker),
+                    detail: workerCleanDebugDetail(details)
+                };
+            } else if (line.includes('WF_')) {
+                eventConfig = {
+                    type: 'Workflow',
+                    severity: 'info',
+                    iconName: 'utility:automation',
+                    title: workerCleanDebugMarker(marker),
+                    detail: workerCleanDebugDetail(details)
+                };
+            } else if (line.includes('METHOD_ENTRY') || line.includes('METHOD_EXIT')) {
+                eventConfig = {
+                    type: 'Apex Method',
+                    severity: 'info',
+                    iconName: 'utility:apex',
+                    title: workerCleanDebugMarker(marker),
+                    detail: workerExtractCodeUnitDetail(details)
+                };
+            } else if (line.includes('CODE_UNIT_STARTED') || line.includes('CODE_UNIT_FINISHED')) {
+                eventConfig = {
+                    type: 'Code Unit',
+                    severity: 'info',
+                    iconName: 'utility:apex',
+                    title: workerCleanDebugMarker(marker),
+                    detail: workerExtractCodeUnitDetail(details)
+                };
+            } else if (line.includes('LIMIT_USAGE_FOR_NS') || line.includes('CUMULATIVE_LIMIT_USAGE')) {
+                eventConfig = {
+                    type: 'Limits',
+                    severity: 'info',
+                    iconName: 'utility:chart',
+                    title: workerCleanDebugMarker(marker),
+                    detail: workerCleanDebugDetail(details)
+                };
+            }
+            if (!eventConfig) return;
+            events.push({
+                key: 'debug-' + counter++,
+                ...eventConfig,
+                detail: eventConfig.detail || workerCleanDebugDetail(details),
+                isContext,
+                timestampNanos,
+                rowClass: eventConfig.severity === 'error'
+                    ? 'debug-event error'
+                    : eventConfig.severity === 'warning'
+                        ? 'debug-event warning'
+                        : 'debug-event',
+                badgeClass: eventConfig.severity === 'error'
+                    ? 'slds-badge slds-theme_error'
+                    : eventConfig.severity === 'warning'
+                        ? 'slds-badge slds-theme_warning'
+                        : 'slds-badge'
+            });
+        });
+        if (end < lines.length) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+    }
+    return events;
+}
+
+async function workerParseScope(requestId, file, scope) {
+    if (!file || typeof file.size !== 'number') throw new Error('The uploaded file is no longer available.');
+    const startByte = Math.max(0, Number(scope?.startByte) || 0);
+    const endByte = Math.min(file.size, Number(scope?.endByte) || file.size);
+    if (endByte <= startByte) throw new Error('The selected DML scope is empty.');
+    if (endByte - startByte > WORKER_MAX_SCOPE_BYTES) {
+        return { tooLarge: true, message: 'This DML scope is too large for interactive detail parsing.' };
+    }
+
+    workerCheckCancelled(requestId);
+    const buffer = await file.slice(startByte, endByte).arrayBuffer();
+    workerCheckCancelled(requestId);
+    const rawLog = new TextDecoder('utf-8').decode(buffer);
+    const lineCount = rawLog ? rawLog.split(/\r?\n/).length : 0;
+    const localScope = {
+        startNanos: scope?.startNanos ?? null,
+        endNanos: scope?.endNanos ?? null,
+        startLine: 0,
+        endLine: Math.max(0, lineCount - 1),
+        startByte,
+        endByte,
+        objectName: scope?.objectName,
+        operation: scope?.operation,
+        rowCount: scope?.rowCount,
+        contextEvents: scope?.contextEvents || []
+    };
+    const signal = workerSignal(requestId);
+    const tree = await buildExecutionTreeAsync(rawLog, { chunkSize: 1000, signal });
+    const treeResult = await extractDmlCardResult(tree, {
+        includeInferredUiSaves: false,
+        signal
+    });
+    const fieldChanges = await extractFieldChangesFromDebugLog(rawLog, localScope, { signal });
+    const debugEvents = await workerParseDebugEvents(rawLog, localScope, requestId);
+    return {
+        rawLog,
+        tree,
+        treeResult,
+        debugEvents,
+        fieldChanges,
+        fieldChangesAvailable: rawLog.includes('|VARIABLE_ASSIGNMENT|'),
+        scope: localScope
+    };
+}
+
+self.onmessage = async (event) => {
+    const { type, requestId, file, scope } = event.data || {};
+    if (type === 'CANCEL') {
+        workerCancelledRequests.add(requestId);
+        return;
+    }
+    if (!requestId) return;
+
+    try {
+        if (type === 'INDEX_FILE') {
+            workerSend('RESULT', requestId, { result: await workerIndexFile(requestId, file) });
+        } else if (type === 'PARSE_SCOPE') {
+            workerSend('RESULT', requestId, {
+                result: await workerParseScope(requestId, file || workerActiveFile, scope)
+            });
+        } else {
+            throw new Error('Unknown worker request: ' + type);
+        }
+    } catch (error) {
+        if (error?.name === 'AbortError') {
+            workerSend('CANCELLED', requestId);
+        } else {
+            workerSend('ERROR', requestId, { message: error?.message || 'Worker parsing failed.' });
+        }
+    } finally {
+        workerCancelledRequests.delete(requestId);
+    }
+};
+
+self.postMessage({ type: 'READY' });

@@ -1,12 +1,19 @@
 {
   "packageDirectories": [
     {
+      "versionName": "Version 1.0",
+      "versionNumber": "1.0.0.NEXT",
       "path": "force-app",
-      "default": true
+      "default": true,
+      "package": "DML Transaction Visualizer",
+      "versionDescription": ""
     }
   ],
   "name": "dml visualizer",
-  "namespace": "",
+  "namespace": "dmlviz",
   "sfdcLoginUrl": "https://login.salesforce.com",
-  "sourceApiVersion": "67.0"
+  "sourceApiVersion": "67.0",
+  "packageAliases": {
+    "DML Transaction Visualizer": "0HoNS0000005ox30AA"
+  }
 }

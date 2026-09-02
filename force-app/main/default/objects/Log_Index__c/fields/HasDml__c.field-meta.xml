@@ -3,5 +3,6 @@
     <fullName>HasDml__c</fullName>
     <defaultValue>false</defaultValue>
     <label>Has DML</label>
+    <trackTrending>false</trackTrending>
     <type>Checkbox</type>
 </CustomField>
