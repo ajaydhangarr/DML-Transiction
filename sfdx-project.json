@@ -14,6 +14,10 @@
   "sfdcLoginUrl": "https://login.salesforce.com",
   "sourceApiVersion": "67.0",
   "packageAliases": {
-    "DML Transaction Visualizer": "0HoNS0000005ox30AA"
+    "DML Transaction Visualizer": "0HoNS0000005ox30AA",
+    "DML Transaction Visualizer@1.0.0-1": "04tNS000000YK7ZYAW"
   }
 }
+
+
+    //StrongKey123!

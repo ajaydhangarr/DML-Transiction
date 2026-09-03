@@ -15,6 +15,17 @@ export default class DmlActionTree extends LightningElement {
     _processedCacheExpandedKeys = null;
     _processedCache = [];
 
+    errorCallback(error) {
+        this.dispatchEvent(new CustomEvent('treeerror', {
+            bubbles: true,
+            composed: true,
+            detail: {
+                renderToken: this.renderToken,
+                message: error?.message || 'The execution tree could not be rendered.'
+            }
+        }));
+    }
+
     renderedCallback() {
         const signature = this.renderToken ?? 'default';
         if (this._readySignature === signature && this._readyActions === this.actions) return;
@@ -64,27 +75,25 @@ export default class DmlActionTree extends LightningElement {
     }
 
     collectAllKeys(actionList, setRef) {
-        (actionList || []).forEach((act) => {
-            if (act.hasChildren) {
-                setRef.add(act.key);
-                setRef.delete(`collapsed-${act.key}`);
-                if (act.children && act.children.length > 0) {
-                    this.collectAllKeys(act.children, setRef);
-                }
-            }
-        });
+        const pending = [...(actionList || [])];
+        while (pending.length) {
+            const act = pending.pop();
+            if (!act?.hasChildren) continue;
+            setRef.add(act.key);
+            setRef.delete(`collapsed-${act.key}`);
+            if (act.children?.length) pending.push(...act.children);
+        }
     }
 
     collectAllCollapsedKeys(actionList, setRef) {
-        (actionList || []).forEach((act) => {
-            if (act.hasChildren) {
-                setRef.delete(act.key);
-                setRef.add(`collapsed-${act.key}`);
-                if (act.children && act.children.length > 0) {
-                    this.collectAllCollapsedKeys(act.children, setRef);
-                }
-            }
-        });
+        const pending = [...(actionList || [])];
+        while (pending.length) {
+            const act = pending.pop();
+            if (!act?.hasChildren) continue;
+            setRef.delete(act.key);
+            setRef.add(`collapsed-${act.key}`);
+            if (act.children?.length) pending.push(...act.children);
+        }
     }
 
     get processedActions() {
@@ -118,27 +127,32 @@ export default class DmlActionTree extends LightningElement {
     }
 
     appendVisibleRows(actionList, rows, depth) {
-        for (const action of actionList || []) {
+        const pending = (actionList || []).slice().reverse().map((action) => ({ action, depth }));
+        while (pending.length) {
             if (rows.length >= MAX_VISIBLE_NODES) {
                 this._visibleLimitReached = true;
                 return;
             }
+            const current = pending.pop();
+            const action = current.action;
+            const currentDepth = current.depth;
 
             const isExpanded = this.expandedKeys.has(action.key) ||
                 (!this.expandedKeys.has(`collapsed-${action.key}`) && action.defaultExpanded);
             rows.push({
                 ...action,
-                depth,
-                indentStyle: `--tree-indent: ${Math.min(depth, 12) * 1.25}rem`,
+                depth: currentDepth,
+                indentStyle: `--tree-indent: ${Math.min(currentDepth, 12) * 1.25}rem`,
                 expanded: isExpanded,
                 toggleIcon: isExpanded ? 'utility:chevrondown' : 'utility:chevronright',
                 itemClass: action.incomplete ? 'tree-node incomplete-node' : 'tree-node'
             });
 
             if (isExpanded && action.children?.length) {
-                this.appendVisibleRows(action.children, rows, depth + 1);
+                for (let index = action.children.length - 1; index >= 0; index -= 1) {
+                    pending.push({ action: action.children[index], depth: currentDepth + 1 });
+                }
             }
-            if (this._visibleLimitReached) return;
         }
     }
 
@@ -163,10 +177,11 @@ export default class DmlActionTree extends LightningElement {
     }
 
     findAction(actionList, key) {
-        for (const action of actionList || []) {
-            if (action.key === key) return action;
-            const nested = this.findAction(action.children, key);
-            if (nested) return nested;
+        const pending = [...(actionList || [])];
+        while (pending.length) {
+            const action = pending.pop();
+            if (action?.key === key) return action;
+            if (action?.children?.length) pending.push(...action.children);
         }
         return null;
     }

@@ -12,7 +12,8 @@ import {
     getScopedLogLines
 } from './dmlLogParser.js';
 
-const MAX_FETCHABLE_LOG_BYTES = 6000000;
+// Keep the client-side guard aligned with DebugLogController's synchronous callout limit.
+const MAX_FETCHABLE_LOG_BYTES = 5000000;
 const MAX_UPLOAD_BYTES = 60000000;
 const MAX_RAW_LOG_CACHE_ENTRIES = 2;
 const MAX_DETAIL_CACHE_ENTRIES = 8;
@@ -40,7 +41,10 @@ export default class DmlTransactionVisualizer extends LightningElement {
     scanSessionId = 0;
     scanPendingCount = 0;
     blockedLogCount = 0;
+    debugLogFailures = [];
     debugLogError = '';
+    detailError = '';
+    lastUiError = '';
     queueStats = { logCount: 0, businessCardCount: 0, confirmedDmlCount: 0, internalDmlCount: 0 };
     detail = {};
     selectedId;
@@ -141,6 +145,116 @@ export default class DmlTransactionVisualizer extends LightningElement {
         window.removeEventListener('message', this.uploadedParserMessageHandler);
     }
 
+    errorCallback(error, stack) {
+        // This is the LWC error boundary for unexpected render/proxy errors. Keep the
+        // component recoverable and replace Salesforce's generic component dialog with
+        // an actionable message in the queue area.
+        this.scanSessionId += 1;
+        this.scanAbortController?.abort();
+        this.uploadedAbortController?.abort();
+        this.clearTreeReadyTimeout();
+        this.queueLoading = false;
+        this.detailLoading = false;
+        this.tabLoading = false;
+        this.treeLoading = false;
+        this.loading = false;
+        this.debugLogError = 'The visualizer hit an unexpected UI error. Refresh the component and try again.';
+        this.detailError = 'This view could not be rendered. Refresh the component and try again.';
+        // Preserve a short diagnostic for browser-console debugging without exposing a
+        // potentially sensitive stack trace in the UI.
+        this.lastUiError = this.extractErrorMessage(error) || (stack ? 'Unexpected component error.' : 'Unknown component error.');
+    }
+
+    extractErrorMessage(error) {
+        if (!error) return '';
+        const body = error.body;
+        const candidates = [
+            typeof body === 'string' ? body : null,
+            body?.message,
+            Array.isArray(body) ? body.find((item) => item?.message)?.message : null,
+            body?.pageErrors?.[0]?.message,
+            body?.output?.errors?.[0]?.message,
+            error.message,
+            error.statusText
+        ];
+        const message = candidates.find((value) => typeof value === 'string' && value.trim());
+        if (message) return message.trim();
+        if (Array.isArray(error.errors)) {
+            const first = error.errors.find((item) => item?.message);
+            if (first?.message) return String(first.message).trim();
+        }
+        return '';
+    }
+
+    getUserFacingError(error, context = '', fallback = 'An unexpected error occurred.') {
+        const raw = this.extractErrorMessage(error) || fallback;
+        const lower = raw.toLowerCase();
+        if (lower.includes('scope is too large')) {
+            return 'This DML detail scope is larger than the 10 MB interactive detail limit. The log can be indexed, but this detail cannot be opened interactively.';
+        }
+        if (lower.includes('60 mb') || lower.includes('file is larger')) {
+            return 'This file exceeds the 60 MB local parsing limit. Choose a smaller Apex debug log.';
+        }
+        if (lower.includes('log_too_large') || lower.includes('too large') || lower.includes('interactive parsing limit')) {
+            return 'This Apex debug log is larger than the 5 MB interactive limit. Download it and use Open local Apex log for larger files.';
+        }
+        if (lower.includes('named credential') || lower.includes('dml_tooling') || lower.includes('tooling_auth') || lower.includes('callout') || lower.includes('unauthorized') || lower.includes('forbidden')) {
+            return 'Salesforce could not access the Tooling API. Verify that DML_Tooling exists, its principal is authenticated, and the user has the required API/ApexLog permission.';
+        }
+        if (lower.includes('log_not_found') || lower.includes('not found for the current user') || lower.includes('404')) {
+            return 'This Apex debug log is no longer available for the current user. It may have expired, been deleted, or belong to another org.';
+        }
+        if (lower.includes('file_empty')) {
+            return 'This file is empty. Choose a Salesforce Apex debug log with content and try again.';
+        }
+        if (lower.includes('log_empty') || lower.includes('empty log') || lower.includes('empty file')) {
+            return 'Salesforce returned an empty debug log body. The log may still be generating or may have expired; wait briefly and click Refresh.';
+        }
+        if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('took too long')) {
+            return `${context || 'The operation'} timed out. Try again, or use a smaller/local log file.`;
+        }
+        if (lower.includes('parser') || lower.includes('worker') || lower.includes('iframe') || lower.includes('local log')) {
+            return `${context || 'The local log parser'} could not complete. Refresh the page and try again; if it continues, choose a smaller valid Salesforce Apex log.`;
+        }
+        if (lower.includes('permission') || lower.includes('access')) {
+            return `${context || 'Salesforce denied this operation.'} Verify the user permission set and object access, then try again.`;
+        }
+        const clean = raw.replace(/^(?:[A-Z_]+):\s*/i, '').trim();
+        return context ? `${context} ${clean}` : clean;
+    }
+
+    get hasDebugLogFailures() {
+        return this.debugLogFailures.length > 0;
+    }
+
+    updateDebugLogFailureMessage() {
+        this.debugLogError = this.debugLogFailures.length
+            ? `${this.debugLogFailures.length} recent debug log(s) could not be analyzed. See the affected log details below.`
+            : undefined;
+    }
+
+    recordDebugLogFailure(log, error) {
+        const logId = log?.Id || 'unknown-log';
+        const detail = this.getUserFacingError(error, '', 'Unable to analyze this Apex debug log.');
+        const entry = {
+            key: logId,
+            logId,
+            label: log?.StartTime ? `Log ${logId} (${log.StartTime})` : `Log ${logId}`,
+            message: detail
+        };
+        this.debugLogFailures = [
+            ...this.debugLogFailures.filter((item) => item.logId !== logId),
+            entry
+        ];
+        this.updateDebugLogFailureMessage();
+    }
+
+    clearDebugLogFailure(logId) {
+        if (!logId || !this.debugLogFailures.some((item) => item.logId === logId)) return;
+        this.debugLogFailures = this.debugLogFailures.filter((item) => item.logId !== logId);
+        this.updateDebugLogFailureMessage();
+    }
+
     get hasTransactions() {
         return this.transactions.length > 0;
     }
@@ -231,6 +345,17 @@ export default class DmlTransactionVisualizer extends LightningElement {
         this.tabLoading = false;
         this.treeLoading = false;
         this.treeRenderTimedOut = false;
+    }
+
+    handleTreeError(event) {
+        if (event.detail?.renderToken !== this.activeTreeRenderToken || this.activeInspectorTab !== 'tree') {
+            return;
+        }
+        this.clearTreeReadyTimeout();
+        this.tabLoading = false;
+        this.treeLoading = false;
+        this.treeRenderTimedOut = true;
+        this.detailError = 'The execution tree could not be rendered for this transaction. Switch tabs or select the transaction again to retry.';
     }
 
     get isInspectorBusy() {
@@ -479,27 +604,36 @@ export default class DmlTransactionVisualizer extends LightningElement {
     filterDebugOnly(actionList) {
         if (!actionList || !actionList.length) return [];
         let visited = 0;
-        const filter = (nodes) => {
-            const result = [];
-            for (const act of nodes || []) {
-                if (visited >= MAX_DEBUG_ONLY_NODES) break;
-                visited += 1;
-                if (act.type === 'USER_DEBUG') {
-                    result.push(act);
-                } else if (act.children && act.children.length > 0) {
-                    const filteredChildren = filter(act.children);
-                    if (filteredChildren.length > 0) {
-                        result.push({
-                            ...act,
-                            children: filteredChildren,
+        let rootResult = [];
+        const frames = [{ nodes: actionList, index: 0, result: [], parent: null, parentNode: null }];
+        while (frames.length) {
+            const frame = frames[frames.length - 1];
+            if (frame.index >= frame.nodes.length || visited >= MAX_DEBUG_ONLY_NODES) {
+                frames.pop();
+                if (frame.parent) {
+                    if (frame.result.length) {
+                        frame.parent.result.push({
+                            ...frame.parentNode,
+                            children: frame.result,
                             hasChildren: true
                         });
                     }
+                } else {
+                    rootResult = frame.result;
                 }
+                continue;
             }
-            return result;
-        };
-        return filter(actionList);
+
+            const act = frame.nodes[frame.index++];
+            if (!act) continue;
+            visited += 1;
+            if (act.type === 'USER_DEBUG') {
+                frame.result.push(act);
+            } else if (act.children?.length) {
+                frames.push({ nodes: act.children, index: 0, result: [], parent: frame, parentNode: act });
+            }
+        }
+        return rootResult;
     }
 
     get hasDebugLogs() {
@@ -604,10 +738,14 @@ export default class DmlTransactionVisualizer extends LightningElement {
         return this.selectedCard?.durationLabel || this.detailDurationLabel || `${this.selectedCard?.durationMs || 0} ms`;
     }
 
-    handleCopyRecordId() {
+    async handleCopyRecordId() {
         if (!this.selectedRecordId) return;
-        navigator.clipboard.writeText(this.selectedRecordId);
-        this.showToast('Copied', `Record ID (${this.selectedRecordId}) copied to clipboard.`, 'success');
+        try {
+            await navigator.clipboard.writeText(this.selectedRecordId);
+            this.showToast('Copied', `Record ID (${this.selectedRecordId}) copied to clipboard.`, 'success');
+        } catch {
+            this.showToast('Copy failed', 'The record ID could not be copied. Select and copy it manually.', 'warning');
+        }
     }
 
     get executionHealthClass() {
@@ -702,7 +840,10 @@ export default class DmlTransactionVisualizer extends LightningElement {
 
         const flowOverviewItems = [];
         const extractFlowItems = (nodes) => {
-            (nodes || []).forEach((act) => {
+            const pending = [...(nodes || [])].reverse();
+            while (pending.length) {
+                const act = pending.pop();
+                if (!act) continue;
                 if (act.type === 'FLOW_START_INTERVIEW_BEGIN' || (act.type === 'CODE_UNIT_STARTED' && /^Flow:/i.test(act.name || '') && !act.children?.some(c => c.type === 'FLOW_START_INTERVIEW_BEGIN'))) {
                     const elements = (act.children || [])
                         .filter(c => c.type === 'FLOW_ELEMENT_BEGIN' || c.label === 'Flow Element')
@@ -716,16 +857,21 @@ export default class DmlTransactionVisualizer extends LightningElement {
                         icon: 'utility:flow'
                     });
                 } else if (act.children && act.children.length > 0) {
-                    extractFlowItems(act.children);
+                    for (let index = act.children.length - 1; index >= 0; index -= 1) {
+                        pending.push(act.children[index]);
+                    }
                 }
-            });
+            }
         };
         extractFlowItems(this.selectedCardActions);
 
         const soqlOverviewItems = [];
         const soslOverviewItems = [];
         const extractQueryItems = (nodes) => {
-            (nodes || []).forEach((act) => {
+            const pending = [...(nodes || [])].reverse();
+            while (pending.length) {
+                const act = pending.pop();
+                if (!act) continue;
                 if (act.type === 'SOQL_EXECUTE_BEGIN') {
                     soqlOverviewItems.push({
                         id: `soql-item-${act.key || soqlOverviewItems.length}`,
@@ -742,9 +888,11 @@ export default class DmlTransactionVisualizer extends LightningElement {
                     });
                 }
                 if (act.children && act.children.length > 0) {
-                    extractQueryItems(act.children);
+                    for (let index = act.children.length - 1; index >= 0; index -= 1) {
+                        pending.push(act.children[index]);
+                    }
                 }
-            });
+            }
         };
         extractQueryItems(this.selectedCardActions);
 
@@ -896,6 +1044,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.selectedQueueIds = [];
             this.isQueueDeleteMode = false;
             this.blockedLogCount = 0;
+            this.debugLogFailures = [];
             this.scanPendingCount = 0;
             this.queueStats = { logCount: 0, businessCardCount: 0, confirmedDmlCount: 0, internalDmlCount: 0 };
             this.uploadState = 'idle';
@@ -904,6 +1053,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.uploadMessage = '';
             this.uploadedFile = null;
             this.uploadedScopeCache.clear();
+            this.detailError = '';
             this.clearFileInput();
             this.clearSelectedTransaction();
         }
@@ -922,6 +1072,17 @@ export default class DmlTransactionVisualizer extends LightningElement {
             );
             const pendingLogs = queue?.pendingLogs || [];
             this.blockedLogCount = (queue?.blockedLogs || []).length;
+            this.debugLogFailures = (queue?.blockedLogs || []).map((log) => ({
+                key: log.Id,
+                logId: log.Id,
+                label: log.StartTime ? `Log ${log.Id} (${log.StartTime})` : `Log ${log.Id}`,
+                message: this.getUserFacingError(
+                    new Error(log.IndexStatus || 'This log was not available for analysis.'),
+                    '',
+                    'This log was not available for analysis.'
+                )
+            }));
+            this.updateDebugLogFailureMessage();
             this.scanPendingCount = pendingLogs.length;
             if (!pendingLogs.length) {
                 this.transactions = [];
@@ -958,7 +1119,11 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.transactions = [];
             this.queueStats = { logCount: 0, businessCardCount: 0, confirmedDmlCount: 0, internalDmlCount: 0 };
             this.syncObjectOptions([]);
-            this.debugLogError = error?.body?.message || error?.message || 'We could not load recent Apex debug logs. Please click Refresh and try again.';
+            this.debugLogError = this.getUserFacingError(
+                error,
+                'We could not load recent Apex debug logs.',
+                'Please click Refresh and try again.'
+            );
         } finally {
             if (sessionId === this.scanSessionId && this.scanPendingCount === 0) {
                 this.queueLoading = false;
@@ -980,7 +1145,11 @@ export default class DmlTransactionVisualizer extends LightningElement {
             await Promise.all([worker(), worker()]);
         } catch (error) {
             if (sessionId === this.scanSessionId && !signal?.aborted) {
-                this.debugLogError = error?.message || 'Scanning stopped before all recent logs could be checked. Please click Refresh and try again.';
+                this.debugLogError = this.getUserFacingError(
+                    error,
+                    'Scanning stopped before all recent logs could be checked.',
+                    'Please click Refresh and try again.'
+                );
             }
         } finally {
             if (sessionId === this.scanSessionId && !signal?.aborted) {
@@ -996,12 +1165,15 @@ export default class DmlTransactionVisualizer extends LightningElement {
             if (Number(log.LogLength) > MAX_FETCHABLE_LOG_BYTES) {
                 if (sessionId === this.scanSessionId) {
                     this.blockedLogCount += 1;
-                    this.debugLogError = 'Some recent logs exceed the interactive parsing limit and were skipped.';
+                    this.recordDebugLogFailure(log, new Error('LOG_TOO_LARGE'));
                 }
                 return;
             }
 
             const rawLog = await this.getDebugLogBody(logId);
+            if (!rawLog.trim()) {
+                throw new Error('LOG_EMPTY: Salesforce returned an empty debug log body.');
+            }
             if (rawLog.length > MAX_FETCHABLE_LOG_BYTES) {
                 this.debugLogBodies.delete(logId);
                 throw new Error('This Apex debug log exceeds the interactive parsing limit and could not be analyzed.');
@@ -1041,11 +1213,13 @@ export default class DmlTransactionVisualizer extends LightningElement {
                 }));
                 this.addScannedRows(newRows, sessionId);
             }
+            if (sessionId === this.scanSessionId && !signal?.aborted) {
+                this.clearDebugLogFailure(logId);
+            }
         } catch (error) {
             if (error?.name === 'AbortError' || signal?.aborted) return;
-            const message = error?.body?.message || error?.message || 'Unable to scan debug log.';
             if (sessionId === this.scanSessionId) {
-                this.debugLogError = `This Apex debug log could not be analyzed. ${message}`;
+                this.recordDebugLogFailure(log, error);
                 this.blockedLogCount += 1;
             }
         } finally {
@@ -1086,6 +1260,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
             rows,
             filters: { ...this.filters },
             blockedLogCount: this.blockedLogCount,
+            debugLogFailures: this.debugLogFailures.map((item) => ({ ...item })),
             scanPendingCount: this.scanPendingCount,
             queueStats: {
                 ...this.queueStats,
@@ -1100,13 +1275,14 @@ export default class DmlTransactionVisualizer extends LightningElement {
         this.filters = { ...queueSnapshot.filters };
         this.rawTransactionRows = (queueSnapshot.rows || []).map((row) => ({ ...row }));
         this.blockedLogCount = queueSnapshot.blockedLogCount || 0;
+        this.debugLogFailures = (queueSnapshot.debugLogFailures || []).map((item) => ({ ...item }));
         this.scanPendingCount = queueSnapshot.scanPendingCount || 0;
         this.queueStats = { ...queueSnapshot.queueStats };
         this.transactions = this.formatQueueRows(this.rawTransactionRows);
         this.syncObjectOptions(this.rawTransactionRows);
         this.endGlobalLoading(this.loadingToken);
         this.queueLoading = false;
-        this.debugLogError = undefined;
+        this.updateDebugLogFailureMessage();
     }
 
     createDmlSummaryRow(log) {
@@ -1204,12 +1380,15 @@ export default class DmlTransactionVisualizer extends LightningElement {
 
     handleUploadedParserFrameLoad(event) {
         this.uploadedParserFrame = event.target;
+        // A reloaded iframe gets a new worker/READY handshake. Do not reuse the
+        // previous readiness flag or the first postMessage can be lost.
+        this.uploadedParserFrameReady = false;
         this.uploadedParserFrameOrigin = new URL(event.target.src, window.location.href).origin;
     }
 
     handleUploadedParserFrameError() {
         this.uploadedParserFrameReady = false;
-        this.rejectUploadedParserFrame(new Error('The local log parser could not be loaded. Please refresh the page and try again.'));
+        this.rejectUploadedParserFrame(new Error('PARSER_FRAME_UNAVAILABLE: The local log parser could not be loaded. Refresh the page and try again.'));
     }
 
     handleUploadedParserMessage(event) {
@@ -1246,7 +1425,10 @@ export default class DmlTransactionVisualizer extends LightningElement {
             error.name = 'AbortError';
             pending.settleReject(error);
         } else if (message.type === 'ERROR') {
-            pending.settleReject(new Error(message.message || 'The local log parser failed while processing the file.'));
+            const error = new Error(message.message || 'The local log parser failed while processing the file.');
+            error.code = message.code;
+            error.phase = message.phase;
+            pending.settleReject(error);
         }
     }
 
@@ -1421,6 +1603,9 @@ export default class DmlTransactionVisualizer extends LightningElement {
         this.uploadedScopeCache.clear();
         const loadingToken = this.beginGlobalLoading();
         try {
+            if (file.size === 0) {
+                throw new Error('FILE_EMPTY: This file is empty. Choose a Salesforce Apex debug log with content.');
+            }
             if (file.size > MAX_UPLOAD_BYTES) {
                 throw new Error('This file is larger than the 60 MB interactive parsing limit.');
             }
@@ -1428,6 +1613,9 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.uploadState = 'parsing';
             const indexResult = await this.runUploadedWorkerRequest('INDEX_FILE', { file }, signal);
             if (sessionId !== this.uploadedParseSession || signal.aborted) return;
+            if (!Number(indexResult?.lineCount) || !Number(indexResult?.recognizedEventCount)) {
+                throw new Error('FILE_FORMAT: This file does not look like a Salesforce Apex debug log. Check that you selected the raw .log/.txt file, not a screenshot, HTML page, or exported error response.');
+            }
             const cards = indexResult?.cards || [];
             const uploadId = `UPLOAD-${Date.now()}`;
             const rows = cards.map((card, index) => this.createDmlSummaryRow({
@@ -1467,7 +1655,11 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.uploadState = 'ready';
             this.uploadMessage = cards.length
                 ? `File parsed successfully. ${cards.length} business DML card(s) were added to the queue.`
-                : 'File parsed successfully, but no business-object DML was found. Make sure this is a Salesforce Apex debug log.';
+                : indexResult?.internalDmlCount
+                    ? 'The log was recognized, but it contains only technical/logger DML. No business-object DML was added.'
+                    : indexResult?.isTruncated
+                        ? 'The log was recognized but is truncated before a complete business-object DML block could be indexed.'
+                        : 'The log was recognized, but no business-object DML event was found. Check the trace flags and log filters.';
             if (rows.length) {
                 await this.loadQueueTransactionDetail(rows[0]);
             } else {
@@ -1476,7 +1668,11 @@ export default class DmlTransactionVisualizer extends LightningElement {
         } catch (error) {
             if (error?.name === 'AbortError' || sessionId !== this.uploadedParseSession) return;
             this.uploadState = 'error';
-            this.uploadMessage = error?.message || 'We could not read this file as a Salesforce Apex debug log.';
+            this.uploadMessage = this.getUserFacingError(
+                error,
+                'We could not read this file as a Salesforce Apex debug log.',
+                'Choose a valid .log or .txt file and try again.'
+            );
             this.showToast('Unable to parse file', this.uploadMessage, 'error');
         } finally {
             this.endGlobalLoading(loadingToken);
@@ -1494,6 +1690,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
         const isNewSelection = this.selectedId !== transactionId;
         this.cancelActiveDetailParse();
         this.clearTreeReadyTimeout();
+        this.detailError = '';
         this.activeInspectorTab = 'details';
         this.activeTreeRenderToken = ++this.treeRenderToken;
         this.treeLoading = false;
@@ -1503,7 +1700,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.fieldGroupPage = 1;
             this.selectedFieldGroupKey = undefined;
             this.parsedDebugEvents = [];
-            this.debugLogError = undefined;
             this.detail = this.detailCache.get(transactionId) || {};
             this.isDebugOnly = false;
         }
@@ -1514,12 +1710,19 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.transactions = this.formatQueueRows(this.rawTransactionRows || this.transactions);
         } catch (error) {
             if (error?.name === 'AbortError') return;
-            const message = error?.body?.message || error?.message || 'We could not load this transaction\'s details. Please select it again.';
-            this.debugLogError = message;
+            const message = this.getUserFacingError(
+                error,
+                'We could not load this transaction\'s details.',
+                'Please select it again.'
+            );
+            this.detailError = message;
             this.showToast('Transaction details unavailable', message, 'error');
         } finally {
             if (loadingToken === this.detailLoadingToken) {
                 this.detailLoading = false;
+            }
+            if (this.detailAbortController?.signal?.aborted || loadingToken === this.detailLoadingToken) {
+                this.detailAbortController = null;
             }
         }
     }
@@ -1613,7 +1816,11 @@ export default class DmlTransactionVisualizer extends LightningElement {
             await this.loadTransactions({ forceReload: true });
             this.showToast('Deleted', `${ids.length} transaction(s) deleted from the queue.`, 'success');
         } catch (error) {
-            this.showToast('Delete failed', error?.body?.message || error?.message || 'Unable to delete selected transactions.', 'error');
+            this.showToast(
+                'Delete failed',
+                this.getUserFacingError(error, 'The selected transactions could not be deleted.', 'Verify permissions and try again.'),
+                'error'
+            );
         } finally {
             this.endGlobalLoading(loadingToken);
         }
@@ -1853,6 +2060,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
         this.fieldGroupPage = 1;
         this.selectedFieldGroupKey = undefined;
         this.parsedDebugEvents = [];
+        this.detailError = '';
         this.detail = {};
     }
 
@@ -2084,7 +2292,11 @@ export default class DmlTransactionVisualizer extends LightningElement {
                 'Loading the Apex debug log took too long. Please click Refresh and try again.'
             );
         } catch (error) {
-            throw new Error(error?.body?.message || error?.message || 'We could not load the Apex debug log body. Please try again.');
+            throw new Error(this.getUserFacingError(
+                error,
+                'We could not load the Apex debug log body.',
+                'Please try again.'
+            ));
         }
     }
 

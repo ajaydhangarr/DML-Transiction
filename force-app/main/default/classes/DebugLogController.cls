@@ -161,23 +161,27 @@ public with sharing class DebugLogController {
 
     @AuraEnabled
     public static QueueResponse getQueueLogs() {
-        Id currentUserId = UserInfo.getUserId();
-        QueueResponse response = new QueueResponse();
-        List<ApexLog> recentLogs = [
-            SELECT Id, Operation, Status, StartTime, LogUserId, LogUser.Name,
-                   LogLength, Request, Application
-            FROM ApexLog
-            WHERE LogUserId = :currentUserId
-            ORDER BY StartTime DESC
-            LIMIT :RECENT_LOG_SCAN_LIMIT
-        ];
-        for (ApexLog log : recentLogs) {
-            if (isToolingApiNoise(log)) {
-                continue;
+        try {
+            Id currentUserId = UserInfo.getUserId();
+            QueueResponse response = new QueueResponse();
+            List<ApexLog> recentLogs = [
+                SELECT Id, Operation, Status, StartTime, LogUserId, LogUser.Name,
+                       LogLength, Request, Application
+                FROM ApexLog
+                WHERE LogUserId = :currentUserId
+                ORDER BY StartTime DESC
+                LIMIT :RECENT_LOG_SCAN_LIMIT
+            ];
+            for (ApexLog log : recentLogs) {
+                if (isToolingApiNoise(log)) {
+                    continue;
+                }
+                response.pendingLogs.add(queueWrapper(log));
             }
-            response.pendingLogs.add(queueWrapper(log));
+            return response;
+        } catch (Exception ex) {
+            throw new AuraHandledException('Unable to load recent Apex debug logs. Verify that this user can access ApexLog records and try Refresh again.');
         }
-        return response;
     }
 
     /**
@@ -226,6 +230,7 @@ public with sharing class DebugLogController {
 
         List<ApexLog> logs = Database.query(query);
         ILogParser parser = new DebugLogParser();
+        Integer fetchFailureCount = 0;
 
         for (ApexLog log : logs) {
             if (isToolingApiNoise(log)) {
@@ -238,6 +243,7 @@ public with sharing class DebugLogController {
             try {
                 body = fetchLogBodyInternal(log.Id);
             } catch (Exception ex) {
+                fetchFailureCount += 1;
                 continue;
             }
 
@@ -255,6 +261,9 @@ public with sharing class DebugLogController {
                 }
             }
         }
+        if (result.isEmpty() && fetchFailureCount > 0) {
+            throw new AuraHandledException('Recent logs were found, but their bodies could not be fetched. Verify DML_Tooling authentication and ApexLog access, then try again.');
+        }
         return result;
     }
 
@@ -263,20 +272,29 @@ public with sharing class DebugLogController {
         if (String.isBlank(logId)) {
             throw new AuraHandledException('Log Id is required.');
         }
-        Id currentUserId = UserInfo.getUserId();
-        List<ApexLog> logs = [
-            SELECT Id, Operation, Status, StartTime, LogUserId, LogUser.Name, LogLength
-            FROM ApexLog
-            WHERE Id = :logId
-              AND LogUserId = :currentUserId
-            LIMIT 1
-        ];
-        if (logs.isEmpty()) {
-            return new List<DebugTransactionWrapper>();
+        try {
+            Id currentUserId = UserInfo.getUserId();
+            List<ApexLog> logs = [
+                SELECT Id, Operation, Status, StartTime, LogUserId, LogUser.Name, LogLength
+                FROM ApexLog
+                WHERE Id = :logId
+                  AND LogUserId = :currentUserId
+                LIMIT 1
+            ];
+            if (logs.isEmpty()) {
+                throw new AuraHandledException('Debug log was not found for the current user. It may have expired, been deleted, or belong to another org/user.');
+            }
+            String body = fetchLogBodyInternal(logId);
+            if (String.isBlank(body)) {
+                throw new AuraHandledException('LOG_EMPTY: Salesforce returned an empty debug log body.');
+            }
+            ILogParser parser = new DebugLogParser();
+            return parser.parseAll(logs[0], body);
+        } catch (AuraHandledException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            throw new AuraHandledException('The Apex debug log was found, but its body could not be analyzed. ' + safeExceptionMessage(ex));
         }
-        String body = fetchLogBodyInternal(logId);
-        ILogParser parser = new DebugLogParser();
-        return parser.parseAll(logs[0], body);
     }
 
     @AuraEnabled
@@ -285,25 +303,32 @@ public with sharing class DebugLogController {
             throw new AuraHandledException('Log Id is required.');
         }
 
-        Id currentUserId = UserInfo.getUserId();
-        List<ApexLog> accessibleLogs = [
-            SELECT Id, LogLength
-            FROM ApexLog
-            WHERE Id = :logId
-              AND LogUserId = :currentUserId
-            LIMIT 1
-        ];
-        if (accessibleLogs.isEmpty()) {
-            throw new AuraHandledException('Debug log was not found for the current user.');
-        }
-        if (accessibleLogs[0].LogLength != null && accessibleLogs[0].LogLength > MAX_FETCHABLE_LOG_BYTES) {
-            throw new AuraHandledException('LOG_TOO_LARGE: This debug log is too large for interactive parsing.');
-        }
-
         try {
-            return fetchLogBodyInternal(logId);
+            Id currentUserId = UserInfo.getUserId();
+            List<ApexLog> accessibleLogs = [
+                SELECT Id, LogLength
+                FROM ApexLog
+                WHERE Id = :logId
+                  AND LogUserId = :currentUserId
+                LIMIT 1
+            ];
+            if (accessibleLogs.isEmpty()) {
+                throw new AuraHandledException('Debug log was not found for the current user. It may have expired, been deleted, or belong to another org/user.');
+            }
+            if (accessibleLogs[0].LogLength != null && accessibleLogs[0].LogLength > MAX_FETCHABLE_LOG_BYTES) {
+                throw new AuraHandledException('LOG_TOO_LARGE: This debug log exceeds the 5 MB interactive fetch limit. Use the local file upload for larger logs.');
+            }
+            String body = fetchLogBodyInternal(logId);
+            if (String.isBlank(body)) {
+                throw new AuraHandledException('LOG_EMPTY: Salesforce returned an empty debug log body.');
+            }
+            return body;
+        } catch (AuraHandledException ex) {
+            throw ex;
         } catch (CalloutException ex) {
-            throw new AuraHandledException('Unable to fetch debug log body. Check the DML_Tooling Named Credential. ' + ex.getMessage());
+            throw new AuraHandledException(buildFetchFailureMessage(ex));
+        } catch (Exception ex) {
+            throw new AuraHandledException('The debug log could not be fetched. Verify the log ID, user access, and DML_Tooling Named Credential. ' + safeExceptionMessage(ex));
         }
     }
 
@@ -439,7 +464,33 @@ public with sharing class DebugLogController {
         if (response.getStatusCode() >= 200 && response.getStatusCode() < 300) {
             return response.getBody();
         }
-        throw new AuraHandledException('Unable to fetch debug log body. Status ' + response.getStatusCode() + ': ' + response.getBody());
+        Integer statusCode = response.getStatusCode();
+        if (statusCode == 401 || statusCode == 403) {
+            throw new AuraHandledException('TOOLING_AUTH: Salesforce denied access to the Tooling API. Re-authenticate the DML_Tooling principal and verify the user has the required API/ApexLog access.');
+        }
+        if (statusCode == 404) {
+            throw new AuraHandledException('LOG_NOT_FOUND: Salesforce could not find this Apex debug log. It may have expired, been deleted, or the Named Credential points to a different org.');
+        }
+        if (statusCode == 400) {
+            throw new AuraHandledException('TOOLING_REQUEST: The Tooling API rejected the debug-log request. Verify the endpoint API version and log ID.');
+        }
+        throw new AuraHandledException('TOOLING_HTTP_' + statusCode + ': The Tooling API returned an unexpected response while fetching the debug log. Try again later or verify DML_Tooling.');
+    }
+
+    private static String buildFetchFailureMessage(Exception ex) {
+        String message = safeExceptionMessage(ex).toLowerCase();
+        if (message.contains('named credential') || message.contains('callout') || message.contains('unauthorized') || message.contains('forbidden')) {
+            return 'TOOLING_AUTH: Salesforce could not access the Tooling API. Verify that DML_Tooling exists, its principal is authenticated, and the user has the required permission-set access.';
+        }
+        if (message.contains('timeout') || message.contains('timed out')) {
+            return 'TOOLING_TIMEOUT: The Tooling API did not respond in time. Try again, or use local file upload for a large log.';
+        }
+        return 'TOOLING_UNAVAILABLE: The Tooling API could not be reached. Verify DML_Tooling and try again.';
+    }
+
+    private static String safeExceptionMessage(Exception ex) {
+        String message = ex == null ? null : ex.getMessage();
+        return String.isBlank(message) ? 'No additional error details were provided.' : message.left(255);
     }
 
     private static DebugTransactionWrapper analyzeLog(ApexLog log, String body) {

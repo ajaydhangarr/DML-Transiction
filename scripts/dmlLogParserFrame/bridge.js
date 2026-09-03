@@ -33,7 +33,9 @@
             send({
                 type: 'ERROR',
                 requestId: activeRequestId,
-                message: event?.message || 'The local parser failed while reading the file.'
+                code: 'WORKER_RUNTIME',
+                phase: 'worker',
+                message: event?.message || 'The local parser failed while reading the file. Refresh the page and try again.'
             });
             destroyWorker();
         };
@@ -80,6 +82,8 @@
             send({
                 type: 'ERROR',
                 requestId: message.requestId,
+                code: 'PARSER_START',
+                phase: 'bridge',
                 message: error?.message || 'The local parser could not start. Please refresh the page and try again.'
             });
             destroyWorker();

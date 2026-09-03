@@ -70,6 +70,17 @@
                     </div>
                 </template>
 
+                <template if:true={hasDebugLogFailures}>
+                    <ul class="debug-failure-list" aria-label="Debug log analysis failures">
+                        <template for:each={debugLogFailures} for:item="failure">
+                            <li key={failure.key}>
+                                <strong>{failure.label}</strong>
+                                <span>{failure.message}</span>
+                            </li>
+                        </template>
+                    </ul>
+                </template>
+
                 <template if:true={queueLoading}>
                     <div class="queue-loading" role="status" aria-live="polite">
                         <lightning-spinner alternative-text="Checking recent Apex logs for business DML" size="small"></lightning-spinner>
@@ -127,7 +138,7 @@
             </section>
 
                 <main class="inspector">
-                    <template if:true={isInspectorBusy}>
+                <template if:true={isInspectorBusy}>
                         <div class="inspector-loading" role="status" aria-live="polite">
                             <div class="inspector-loading-content">
                                 <lightning-spinner alternative-text="Loading transaction details" size="medium"></lightning-spinner>
@@ -135,6 +146,12 @@
                             </div>
                         </div>
                     </template>
+                <template if:true={detailError}>
+                    <div class="debug-error detail-debug-error" role="alert">
+                        <lightning-icon icon-name="utility:error" size="x-small" variant="inverse"></lightning-icon>
+                        <span>{detailError}</span>
+                    </div>
+                </template>
                 <template if:true={detail.log}>
                     <article class="inspector-header">
                         <div>
@@ -353,7 +370,7 @@
                                             </label>
                                         </div>
                                     </div>
-                                    <c-dml-action-tree actions={displayActions} ancestor-context={selectedCardAncestorContext} render-token={activeTreeRenderToken} expand-state={expandState} ontreeready={handleTreeReady}></c-dml-action-tree>
+                                    <c-dml-action-tree actions={displayActions} ancestor-context={selectedCardAncestorContext} render-token={activeTreeRenderToken} expand-state={expandState} ontreeready={handleTreeReady} ontreeerror={handleTreeError}></c-dml-action-tree>
                                 </template>
                                 <template if:false={selectedCardHasActions}>
                                     <div class="empty-panel slim">No nested execution actions were captured for this DML operation.</div>

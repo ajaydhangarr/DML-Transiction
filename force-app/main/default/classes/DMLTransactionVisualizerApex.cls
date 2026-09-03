@@ -122,7 +122,7 @@ public without sharing class DMLTransactionVisualizerApex {
             }
             return filtered;
         } catch (Exception ex) {
-            throw new AuraHandledException(ex.getMessage());
+            throw new AuraHandledException(dataErrorMessage('Loading saved transactions', ex));
         }
     }
 
@@ -143,7 +143,7 @@ public without sharing class DMLTransactionVisualizerApex {
             }
             return options;
         } catch (Exception ex) {
-            throw new AuraHandledException(ex.getMessage());
+            throw new AuraHandledException(dataErrorMessage('Loading transaction object filters', ex));
         }
     }
 
@@ -160,9 +160,7 @@ public without sharing class DMLTransactionVisualizerApex {
                 LIMIT 1
             ];
             if (logs.isEmpty()) {
-                detail.steps = new List<TXN_Step__c>();
-                detail.changesByStepId = new Map<Id, List<TXN_Field_Change__c>>();
-                return detail;
+                throw new AuraHandledException('Saved transaction not found. It may have been deleted or is no longer available. Refresh the queue and try again.');
             }
             detail.log = logs[0];
             detail.steps = [
@@ -190,7 +188,10 @@ public without sharing class DMLTransactionVisualizerApex {
             }
             return detail;
         } catch (Exception ex) {
-            throw new AuraHandledException(ex.getMessage());
+            if (ex instanceof AuraHandledException) {
+                throw (AuraHandledException) ex;
+            }
+            throw new AuraHandledException(dataErrorMessage('Loading transaction details', ex));
         }
     }
 
@@ -205,7 +206,7 @@ public without sharing class DMLTransactionVisualizerApex {
                 LIMIT 1
             ];
         } catch (Exception ex) {
-            throw new AuraHandledException(ex.getMessage());
+            throw new AuraHandledException(dataErrorMessage('Loading governor-limit details', ex));
         }
     }
 
@@ -241,16 +242,41 @@ public without sharing class DMLTransactionVisualizerApex {
             ];
             if (!persistedSteps.isEmpty()) {
                 Set<Id> stepIds = new Map<Id, TXN_Step__c>(persistedSteps).keySet();
-                Database.delete([
+                List<String> deleteErrors = new List<String>();
+                addDeleteErrors(Database.delete([
                     SELECT Id
                     FROM TXN_Field_Change__c
                     WHERE TXN_Step__c IN :stepIds
-                ], false);
-                Database.delete(persistedSteps, false);
+                ], false), deleteErrors, 'field changes');
+                addDeleteErrors(Database.delete(persistedSteps, false), deleteErrors, 'transaction steps');
+                addDeleteErrors(Database.delete(logs, false), deleteErrors, 'transactions');
+                if (!deleteErrors.isEmpty()) {
+                    throw new AuraHandledException('Some records could not be deleted: ' + String.join(deleteErrors, ' | '));
+                }
+                return;
             }
-            Database.delete(logs, false);
+            List<String> deleteErrors = new List<String>();
+            addDeleteErrors(Database.delete(logs, false), deleteErrors, 'transactions');
+            if (!deleteErrors.isEmpty()) {
+                throw new AuraHandledException('Some records could not be deleted: ' + String.join(deleteErrors, ' | '));
+            }
         } catch (Exception ex) {
-            throw new AuraHandledException(ex.getMessage());
+            if (ex instanceof AuraHandledException) {
+                throw (AuraHandledException) ex;
+            }
+            throw new AuraHandledException('The selected transactions could not be deleted. Verify object permissions and try again.');
+        }
+    }
+
+    private static void addDeleteErrors(List<Database.DeleteResult> results, List<String> errors, String recordType) {
+        for (Database.DeleteResult result : results) {
+            if (result.isSuccess()) {
+                continue;
+            }
+            for (Database.Error deleteError : result.getErrors()) {
+                String detail = deleteError.getStatusCode() + ': ' + deleteError.getMessage();
+                errors.add(recordType + ' - ' + detail.left(180));
+            }
         }
     }
 
@@ -1052,6 +1078,21 @@ public without sharing class DMLTransactionVisualizerApex {
             return value;
         }
         return value.substring(0, maxLength);
+    }
+
+    private static String dataErrorMessage(String operation, Exception ex) {
+        String raw = ex == null || String.isBlank(ex.getMessage()) ? '' : ex.getMessage();
+        String lower = raw.toLowerCase();
+        if (lower.contains('insufficient access') || lower.contains('no access')) {
+            return operation + ' failed because this user does not have access to the visualizer data objects. Assign the required permission set and try again.';
+        }
+        if (lower.contains('invalid sobject type') || lower.contains('invalid field')) {
+            return operation + ' failed because one or more visualizer metadata objects/fields are missing. Deploy the complete package, then try again.';
+        }
+        if (lower.contains('malformed') || lower.contains('invalid')) {
+            return operation + ' received invalid data. Refresh the queue and try again.';
+        }
+        return operation + ' failed. Verify object permissions and that the visualizer metadata is deployed, then try again.';
     }
 
     @TestVisible

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>DMLToolingAuth</members>
+        <name>AuthProvider</name>
+    </types>
+    <types>
+        <members>DML_Tooling_External</members>
+        <name>ExternalCredential</name>
+    </types>
+    <types>
+        <members>DML_Tooling</members>
+        <name>NamedCredential</name>
+    </types>
+    <version>67.0</version>
+</Package>

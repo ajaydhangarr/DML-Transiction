@@ -51,6 +51,7 @@ const SYSTEM_METADATA_OBJECTS = new Set([
   'DMLTransactionVisualizerApex',
   'Unknown Object'
 ]);
+const MAX_SUMMARY_DEPTH = 256;
 
 function parseTimestampNanos(tsPart) {
   if (!tsPart) return null;
@@ -536,9 +537,20 @@ function cardFromNode(node, cardIndex, fields, ancestors = [], rootNode = null, 
 }
 
 function walkTree(node, visitor, ancestors = []) {
-  for (const child of node.children || []) {
-    visitor(child, ancestors);
-    walkTree(child, visitor, [...ancestors, child]);
+  const pending = (node?.children || []).slice().reverse().map((child) => ({
+    node: child,
+    ancestors
+  }));
+  while (pending.length) {
+    const current = pending.pop();
+    visitor(current.node, current.ancestors);
+    const children = current.node.children || [];
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push({
+        node: children[index],
+        ancestors: [...current.ancestors, current.node]
+      });
+    }
   }
 }
 
@@ -1017,6 +1029,25 @@ function parseValidationEventDetails(type, detail, previousRuleName = null) {
 export function summarizeChildren(children, parentId = 'root', depth = 1, previousValidationRule = null) {
   if (!children?.length) {
     return [];
+  }
+
+  if (depth > MAX_SUMMARY_DEPTH) {
+    return [{
+      key: `${parentId}-depth-limit`,
+      type: 'TREE_DEPTH_LIMIT',
+      label: 'Nested actions hidden',
+      name: 'This execution branch is deeper than the interactive display limit.',
+      durationMs: '',
+      durationLabel: '',
+      timestamp: '-',
+      incomplete: true,
+      hasChildren: false,
+      repeatCount: 1,
+      defaultExpanded: false,
+      showTypeBadge: true,
+      badgeClass: 'slds-badge slds-theme_warning',
+      iconName: 'utility:warning'
+    }];
   }
 
   const displayChildren = aggregateRepeatedActions(children);

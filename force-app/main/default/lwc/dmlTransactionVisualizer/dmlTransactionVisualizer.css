@@ -229,6 +229,37 @@
     overflow-wrap: anywhere;
 }
 
+.debug-failure-list {
+    list-style: none;
+    margin: -0.25rem 0 0.75rem;
+    padding: 0 0.75rem;
+}
+
+.debug-failure-list li {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    border-radius: 0.35rem;
+    color: #7c2d12;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
+    margin-top: 0.35rem;
+    padding: 0.45rem 0.55rem;
+    overflow-wrap: anywhere;
+}
+
+.debug-failure-list strong {
+    flex: 0 0 auto;
+}
+
+.debug-failure-list span {
+    min-width: 0;
+}
+
+.detail-debug-error {
+    margin: 0.75rem;
+}
+
 .queue-list {
     max-height: min(42rem, calc(100vh - 18rem));
     min-height: 0;

@@ -1309,6 +1309,12 @@ function workerConsumeIndexLine(state, rawLine, lineIndex, startByte, endByte) {
     const timestampStr = parseTimestampString(parts[0]);
     const closingEvents = Object.values(BEGIN_END_MAP);
 
+    if (closingEvents.includes(eventType) ||
+        Object.prototype.hasOwnProperty.call(BEGIN_END_MAP, eventType) ||
+        SINGLE_LINE_EVENTS.has(eventType)) {
+        state.recognizedEventCount += 1;
+    }
+
     if (closingEvents.includes(eventType)) {
         let matchIndex = -1;
         for (let index = state.stack.length - 1; index >= 0; index -= 1) {
@@ -1369,6 +1375,7 @@ async function workerIndexFile(requestId, file) {
         cards: [],
         confirmedDmlCount: 0,
         internalDmlCount: 0,
+        recognizedEventCount: 0,
         truncated: false
     };
     const decoder = new TextDecoder('utf-8');
@@ -1410,6 +1417,7 @@ async function workerIndexFile(requestId, file) {
         cards: state.cards,
         confirmedDmlCount: state.confirmedDmlCount,
         internalDmlCount: state.internalDmlCount,
+        recognizedEventCount: state.recognizedEventCount,
         isTruncated: state.truncated
     };
 }
@@ -1526,7 +1534,7 @@ async function workerParseDebugEvents(rawLog, dmlScope, requestId) {
                 };
             } else if (line.includes('VALIDATION_') || /FIELD_CUSTOM_VALIDATION_EXCEPTION|REQUIRED_FIELD_MISSING/i.test(line)) {
                 const validation = marker.startsWith('VALIDATION_')
-                    ? parseValidationEventDetails(marker, details, lastValidationRuleName)
+                    ? workerParseValidationEventDetails(marker, details, lastValidationRuleName)
                     : null;
                 if (validation?.ruleName) lastValidationRuleName = validation.ruleName;
                 eventConfig = {
@@ -1598,7 +1606,7 @@ async function workerParseDebugEvents(rawLog, dmlScope, requestId) {
     return events;
 }
 
-function parseValidationEventDetails(type, detail, previousRuleName) {
+function workerParseValidationEventDetails(type, detail, previousRuleName) {
     const segments = String(detail || '')
         .split('|')
         .map((segment) => segment.trim())
@@ -1634,7 +1642,11 @@ async function workerParseScope(requestId, file, scope) {
     const endByte = Math.min(file.size, Number(scope?.endByte) || file.size);
     if (endByte <= startByte) throw new Error('This DML scope does not contain any data to display.');
     if (endByte - startByte > WORKER_MAX_SCOPE_BYTES) {
-        return { tooLarge: true, message: 'This DML scope is too large for interactive detail parsing.' };
+        return {
+            tooLarge: true,
+            code: 'SCOPE_TOO_LARGE',
+            message: 'This DML scope is too large for interactive detail parsing.'
+        };
     }
 
     workerCheckCancelled(requestId);
@@ -1695,7 +1707,11 @@ self.onmessage = async (event) => {
         if (error?.name === 'AbortError') {
             workerSend('CANCELLED', requestId);
         } else {
-            workerSend('ERROR', requestId, { message: error?.message || 'The local parser failed while processing the file.' });
+            workerSend('ERROR', requestId, {
+                code: error?.code || 'PARSER_RUNTIME',
+                phase: type || 'worker',
+                message: error?.message || 'The local parser failed while processing the file.'
+            });
         }
     } finally {
         workerCancelledRequests.delete(requestId);
