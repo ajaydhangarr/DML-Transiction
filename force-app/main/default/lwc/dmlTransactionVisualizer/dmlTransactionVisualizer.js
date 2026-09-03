@@ -219,9 +219,37 @@ export default class DmlTransactionVisualizer extends LightningElement {
         return this.debugLogFailures.length > 0;
     }
 
+    get groupedDebugLogFailures() {
+        const groups = new Map();
+        this.debugLogFailures.forEach((failure) => {
+            const message = failure?.message || 'This log was not available for analysis.';
+            const group = groups.get(message) || {
+                message,
+                logIds: []
+            };
+            if (failure?.logId && !group.logIds.includes(failure.logId)) {
+                group.logIds.push(failure.logId);
+            }
+            groups.set(message, group);
+        });
+
+        return Array.from(groups.values()).map((group, index) => {
+            const visibleLogIds = group.logIds.slice(0, 3);
+            const remainingCount = Math.max(0, group.logIds.length - visibleLogIds.length);
+            return {
+                key: `debug-failure-group-${index}`,
+                countLabel: `${group.logIds.length} log(s)`,
+                message: group.message,
+                affectedLabel: visibleLogIds.length
+                    ? `Affected logs: ${visibleLogIds.join(', ')}${remainingCount ? ` and ${remainingCount} more` : ''}`
+                    : 'Affected log IDs are unavailable.'
+            };
+        });
+    }
+
     updateDebugLogFailureMessage() {
         this.debugLogError = this.debugLogFailures.length
-            ? `${this.debugLogFailures.length} recent debug log(s) could not be analyzed. See the affected log details below.`
+            ? `${this.debugLogFailures.length} recent debug log(s) could not be analyzed. See the grouped reasons below.`
             : undefined;
     }
 
@@ -1372,7 +1400,11 @@ export default class DmlTransactionVisualizer extends LightningElement {
 
     handleUploadedParserMessage(event) {
         const frame = this.uploadedParserFrame || this.template.querySelector('.parser-frame');
-        if (!frame || event.source !== frame.contentWindow) return;
+        // Lightning Web Security can expose the iframe WindowProxy through a
+        // different wrapper instance. The static-resource origin check below
+        // is the reliable boundary; a strict WindowProxy identity check can
+        // discard valid READY/RESULT messages and make every parse time out.
+        if (!frame) return;
         this.uploadedParserFrame = frame;
         if (!this.uploadedParserFrameOrigin) {
             this.uploadedParserFrameOrigin = new URL(frame.src, window.location.href).origin;

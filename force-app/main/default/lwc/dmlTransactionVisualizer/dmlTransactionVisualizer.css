@@ -240,20 +240,33 @@
     border: 1px solid #fed7aa;
     border-radius: 0.35rem;
     color: #7c2d12;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem 0.5rem;
     margin-top: 0.35rem;
     padding: 0.45rem 0.55rem;
     overflow-wrap: anywhere;
 }
 
-.debug-failure-list strong {
+.debug-failure-heading {
+    align-items: baseline;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
+}
+
+.debug-failure-heading strong {
     flex: 0 0 auto;
 }
 
-.debug-failure-list span {
+.debug-failure-heading span,
+.debug-failure-list small {
     min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.debug-failure-list small {
+    color: #9a3412;
+    display: block;
+    font-size: 0.68rem;
+    margin-top: 0.25rem;
 }
 
 .detail-debug-error {

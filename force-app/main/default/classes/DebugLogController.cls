@@ -53,13 +53,14 @@ public with sharing class DebugLogController {
         @AuraEnabled public List<LogWrapper> blockedLogs = new List<LogWrapper>();
     }
 
+    @TestVisible
     private class DmlSummary {
-        String objectName;
-        String operation;
-        Integer rows;
-        String timestamp;
-        Long startNanos;
-        Long endNanos;
+        @TestVisible String objectName;
+        @TestVisible String operation;
+        @TestVisible Integer rows;
+        @TestVisible String timestamp;
+        @TestVisible Long startNanos;
+        @TestVisible Long endNanos;
     }
 
     public class TimelineEntry {
@@ -332,10 +333,12 @@ public with sharing class DebugLogController {
         }
     }
 
+    @TestVisible
     private static Boolean isToolingApiNoise(ApexLog log) {
         return false;
     }
 
+    @TestVisible
     private static LogWrapper queueWrapper(ApexLog log) {
         LogWrapper wrapper = new LogWrapper();
         wrapper.Id = log.Id;
@@ -353,6 +356,7 @@ public with sharing class DebugLogController {
         return wrapper;
     }
 
+    @TestVisible
     private static List<DmlSummary> extractBusinessDmlSummaries(String body) {
         List<DmlSummary> summaries = new List<DmlSummary>();
         if (String.isBlank(body)) {
@@ -407,6 +411,7 @@ public with sharing class DebugLogController {
         return summaries;
     }
 
+    @TestVisible
     private static Boolean isInternalDmlObject(String objectName) {
         String normalized = String.valueOf(objectName).trim().toUpperCase();
         return INTERNAL_DML_OBJECTS.contains(normalized) ||
@@ -415,6 +420,7 @@ public with sharing class DebugLogController {
             normalized.endsWith('EVENT__E');
     }
 
+    @TestVisible
     private static String parseTimestampString(String timestampPart) {
         if (String.isBlank(timestampPart)) {
             return '-';
@@ -426,6 +432,7 @@ public with sharing class DebugLogController {
         return dotIndex >= 0 ? timeValue.substring(0, dotIndex) : timeValue;
     }
 
+    @TestVisible
     private static Long parseTimestampNanos(String timestampPart) {
         if (String.isBlank(timestampPart)) {
             return null;
@@ -438,6 +445,7 @@ public with sharing class DebugLogController {
         return parseLong(timestampPart.substring(openIndex + 1, closeIndex));
     }
 
+    @TestVisible
     private static Integer parseInteger(String value, Integer fallbackValue) {
         try {
             return Integer.valueOf(value);
@@ -446,6 +454,7 @@ public with sharing class DebugLogController {
         }
     }
 
+    @TestVisible
     private static Long parseLong(String value) {
         try {
             return Long.valueOf(value);
@@ -454,6 +463,7 @@ public with sharing class DebugLogController {
         }
     }
 
+    @TestVisible
     private static String fetchLogBodyInternal(String logId) {
         HttpRequest request = new HttpRequest();
         request.setEndpoint('callout:DML_Tooling/services/data/v67.0/tooling/sobjects/ApexLog/' + EncodingUtil.urlEncode(logId, 'UTF-8') + '/Body');
@@ -477,6 +487,7 @@ public with sharing class DebugLogController {
         throw new AuraHandledException('TOOLING_HTTP_' + statusCode + ': The Tooling API returned an unexpected response while fetching the debug log. Try again later or verify DML_Tooling.');
     }
 
+    @TestVisible
     private static String buildFetchFailureMessage(Exception ex) {
         String message = safeExceptionMessage(ex).toLowerCase();
         if (message.contains('named credential') || message.contains('callout') || message.contains('unauthorized') || message.contains('forbidden')) {
@@ -488,11 +499,13 @@ public with sharing class DebugLogController {
         return 'TOOLING_UNAVAILABLE: The Tooling API could not be reached. Verify DML_Tooling and try again.';
     }
 
+    @TestVisible
     private static String safeExceptionMessage(Exception ex) {
         String message = ex == null ? null : ex.getMessage();
         return String.isBlank(message) ? 'No additional error details were provided.' : message.left(255);
     }
 
+    @TestVisible
     private static DebugTransactionWrapper analyzeLog(ApexLog log, String body) {
         ILogParser parser = new DebugLogParser();
         return parser.parse(log, body);

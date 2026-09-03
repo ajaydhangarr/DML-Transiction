@@ -72,10 +72,13 @@
 
                 <template if:true={hasDebugLogFailures}>
                     <ul class="debug-failure-list" aria-label="Debug log analysis failures">
-                        <template for:each={debugLogFailures} for:item="failure">
+                        <template for:each={groupedDebugLogFailures} for:item="failure">
                             <li key={failure.key}>
-                                <strong>{failure.label}</strong>
-                                <span>{failure.message}</span>
+                                <div class="debug-failure-heading">
+                                    <strong>{failure.countLabel}</strong>
+                                    <span>{failure.message}</span>
+                                </div>
+                                <small>{failure.affectedLabel}</small>
                             </li>
                         </template>
                     </ul>

@@ -3,12 +3,33 @@
     'use strict';
 
     const CHANNEL = 'DML_LOG_PARSER_FRAME_V1';
-    const parentOrigin = window.location.origin;
+
+    // A Salesforce static resource can be served from a different CDN origin
+    // than the Lightning page that embeds it. The frame origin is therefore
+    // not necessarily the parent origin. Prefer the embedding page's origin
+    // from the referrer and learn it from the first parent message when the
+    // browser does not provide a referrer.
+    function getReferrerOrigin() {
+        try {
+            return document.referrer ? new URL(document.referrer).origin : null;
+        } catch {
+            return null;
+        }
+    }
+
+    let parentOrigin = getReferrerOrigin();
     let parserWorker = null;
     let activeRequestId = null;
 
     function send(message) {
-        window.parent.postMessage({ channel: CHANNEL, ...message }, parentOrigin);
+        window.parent.postMessage({ channel: CHANNEL, ...message }, parentOrigin || '*');
+    }
+
+    function isParentMessage(event) {
+        if (event.source !== window.parent) return false;
+        if (parentOrigin && event.origin !== parentOrigin) return false;
+        if (!parentOrigin && event.origin) parentOrigin = event.origin;
+        return true;
     }
 
     function destroyWorker() {
@@ -44,7 +65,7 @@
     }
 
     window.addEventListener('message', (event) => {
-        if (event.source !== window.parent || event.origin !== parentOrigin) return;
+        if (!isParentMessage(event)) return;
         const message = event.data || {};
         if (message.channel !== CHANNEL || !message.type) return;
 
