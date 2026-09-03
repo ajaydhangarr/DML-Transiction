@@ -5,12 +5,6 @@ import getTransactionDetail from '@salesforce/apex/DMLTransactionVisualizerApex.
 import deleteTransactions from '@salesforce/apex/DMLTransactionVisualizerApex.deleteTransactions';
 import getQueueLogs from '@salesforce/apex/DebugLogController.getQueueLogs';
 import fetchLogBody from '@salesforce/apex/DebugLogController.fetchLogBody';
-import {
-    buildExecutionTreeAsync,
-    extractDmlCardResult,
-    extractFieldChangesFromDebugLog,
-    getScopedLogLines
-} from './dmlLogParser.js';
 
 // Keep the client-side guard aligned with DebugLogController's synchronous callout limit.
 const MAX_FETCHABLE_LOG_BYTES = 5000000;
@@ -70,6 +64,8 @@ export default class DmlTransactionVisualizer extends LightningElement {
     uploadedParserFrameResolvers = [];
     uploadedParserMessageHandler = (event) => this.handleUploadedParserMessage(event);
     uploadedWorkerPending = null;
+    uploadedWorkerQueue = [];
+    uploadedWorkerPumpRunning = false;
     uploadedWorkerRequestId = 0;
     uploadedParseSession = 0;
     activeInspectorTab = 'details';
@@ -1178,9 +1174,14 @@ export default class DmlTransactionVisualizer extends LightningElement {
                 this.debugLogBodies.delete(logId);
                 throw new Error('This Apex debug log exceeds the interactive parsing limit and could not be analyzed.');
             }
-            const tree = await buildExecutionTreeAsync(rawLog, { chunkSize: 1000, signal });
-            this.setDebugLogTree(logId, tree);
-            const parsedResult = await extractDmlCardResult(tree, { includeInferredUiSaves: false, signal });
+            const workerResult = await this.runUploadedWorkerRequest('PARSE_TEXT', {
+                rawLog,
+                mode: 'SUMMARY'
+            }, signal);
+            if (workerResult?.tooLarge) {
+                throw new Error(workerResult.message || 'This Salesforce debug log exceeds the interactive parsing limit.');
+            }
+            const parsedResult = workerResult?.treeResult || { cards: [] };
             this.setDebugLogCardResult(logId, parsedResult);
             const summaries = (parsedResult.cards || []).map((card, index) => ({
                 dmlIndex: index,
@@ -1479,6 +1480,8 @@ export default class DmlTransactionVisualizer extends LightningElement {
     rejectUploadedParserFrame(error) {
         const resolvers = this.uploadedParserFrameResolvers.splice(0);
         resolvers.forEach((resolver) => resolver.reject(error));
+        const queued = this.uploadedWorkerQueue.splice(0);
+        queued.forEach((request) => request.settleReject(error));
         const pending = this.uploadedWorkerPending;
         if (pending) pending.settleReject(error);
     }
@@ -1489,37 +1492,20 @@ export default class DmlTransactionVisualizer extends LightningElement {
             error.name = 'AbortError';
             return Promise.reject(error);
         }
-        if (this.uploadedWorkerPending) {
-            return Promise.reject(new Error('Another file is still being parsed. Please wait for it to finish or choose a new file.'));
-        }
         const requestId = ++this.uploadedWorkerRequestId;
-        return this.waitForUploadedParserFrame(signal).then((frame) => new Promise((resolve, reject) => {
+        return new Promise((resolve, reject) => {
             let settled = false;
-            let timeoutId;
-            const sendCancel = () => {
-                try {
-                    frame.contentWindow.postMessage({
-                        channel: 'DML_LOG_PARSER_FRAME_V1',
-                        type: 'CANCEL',
-                        requestId
-                    }, this.uploadedParserFrameOrigin);
-                } catch {
-                    // The frame may already have been unloaded during refresh.
-                }
-            };
-            let settleReject;
+            let started = false;
+            let sendCancel = () => {};
+            let request;
             const abortHandler = () => {
-                sendCancel();
+                if (started) sendCancel();
                 const abortError = new Error('Parsing cancelled.');
                 abortError.name = 'AbortError';
-                settleReject(abortError);
+                request.settleReject(abortError);
             };
             const cleanup = () => {
                 signal?.removeEventListener('abort', abortHandler);
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                    timeoutId = null;
-                }
             };
             const settleResolve = (value) => {
                 if (settled) return;
@@ -1527,53 +1513,129 @@ export default class DmlTransactionVisualizer extends LightningElement {
                 cleanup();
                 if (this.uploadedWorkerPending?.requestId === requestId) this.uploadedWorkerPending = null;
                 resolve(value);
+                this.pumpUploadedWorkerQueue();
             };
-            settleReject = (error) => {
+            const settleReject = (error) => {
                 if (settled) return;
                 settled = true;
                 cleanup();
+                const queuedIndex = this.uploadedWorkerQueue.indexOf(request);
+                if (queuedIndex !== -1) this.uploadedWorkerQueue.splice(queuedIndex, 1);
                 if (this.uploadedWorkerPending?.requestId === requestId) this.uploadedWorkerPending = null;
                 reject(error);
+                this.pumpUploadedWorkerQueue();
             };
-            this.uploadedWorkerPending = {
+            request = {
                 requestId,
+                type,
+                payload,
+                signal,
+                abortHandler,
+                get settled() { return settled; },
+                get started() { return started; },
+                set started(value) { started = value; },
+                get sendCancel() { return sendCancel; },
+                set sendCancel(value) { sendCancel = value; },
                 settleResolve,
                 settleReject,
                 cleanup
             };
             signal?.addEventListener('abort', abortHandler, { once: true });
-            // The timeout is intentional: isolated parsing must have a bounded lifetime.
-            // eslint-disable-next-line @lwc/lwc/no-async-operation
-            timeoutId = setTimeout(() => {
-                sendCancel();
-                settleReject(new Error('Local log parsing took too long. Try a smaller file or a simpler debug log.'));
-            }, UPLOADED_PARSER_REQUEST_TIMEOUT_MS);
-            try {
-                const messagePayload = type === 'PARSE_SCOPE'
-                    ? { scope: payload.scope }
-                    : payload;
-                frame.contentWindow.postMessage({
-                    channel: 'DML_LOG_PARSER_FRAME_V1',
-                    type,
-                    requestId,
-                    ...messagePayload
-                }, this.uploadedParserFrameOrigin);
-            } catch (error) {
-                settleReject(error);
-            }
-        }));
+            this.uploadedWorkerQueue.push(request);
+            this.uploadedWorkerQueue.sort((left, right) => {
+                const leftPriority = left.type === 'PARSE_TEXT' && left.payload?.mode === 'SUMMARY' ? 0 : 1;
+                const rightPriority = right.type === 'PARSE_TEXT' && right.payload?.mode === 'SUMMARY' ? 0 : 1;
+                return rightPriority - leftPriority;
+            });
+            this.pumpUploadedWorkerQueue();
+        });
     }
 
-    destroyUploadedWorker() {
-        const pending = this.uploadedWorkerPending;
-        this.uploadedWorkerPending = null;
-        if (pending) {
-            pending.cleanup();
-            const error = new Error('Parsing cancelled.');
-            error.name = 'AbortError';
-            pending.settleReject(error);
+    async pumpUploadedWorkerQueue() {
+        if (this.uploadedWorkerPumpRunning || this.uploadedWorkerPending) return;
+        this.uploadedWorkerPumpRunning = true;
+        try {
+            while (!this.uploadedWorkerPending && this.uploadedWorkerQueue.length) {
+                const request = this.uploadedWorkerQueue.shift();
+                if (!request || request.settled) continue;
+                this.uploadedWorkerPending = request;
+                let frame;
+                try {
+                    // Requests are intentionally serialized because one Worker owns the
+                    // uploaded file handle and should not parse two large payloads at once.
+                    // eslint-disable-next-line no-await-in-loop
+                    frame = await this.waitForUploadedParserFrame(request.signal);
+                } catch (error) {
+                    request.settleReject(error);
+                    continue;
+                }
+                if (request.settled || request.signal?.aborted) {
+                    request.settleReject(new Error('Parsing cancelled.'));
+                    continue;
+                }
+
+                request.started = true;
+                request.sendCancel = () => {
+                    try {
+                        frame.contentWindow.postMessage({
+                            channel: 'DML_LOG_PARSER_FRAME_V1',
+                            type: 'CANCEL',
+                            requestId: request.requestId
+                        }, this.uploadedParserFrameOrigin);
+                    } catch {
+                        // The frame may already have been unloaded during refresh.
+                    }
+                };
+                // The timeout is intentional: isolated parsing must have a bounded lifetime.
+                // eslint-disable-next-line @lwc/lwc/no-async-operation
+                const timeoutId = setTimeout(() => {
+                    request.sendCancel();
+                    request.settleReject(new Error('Local log parsing took too long. Try a smaller file or a simpler debug log.'));
+                }, UPLOADED_PARSER_REQUEST_TIMEOUT_MS);
+                request.cleanup = () => {
+                    request.signal?.removeEventListener('abort', request.abortHandler);
+                    clearTimeout(timeoutId);
+                };
+                try {
+                    const messagePayload = request.type === 'PARSE_SCOPE'
+                        ? { scope: request.payload.scope }
+                        : request.payload;
+                    frame.contentWindow.postMessage({
+                        channel: 'DML_LOG_PARSER_FRAME_V1',
+                        type: request.type,
+                        requestId: request.requestId,
+                        ...messagePayload
+                    }, this.uploadedParserFrameOrigin);
+                } catch (error) {
+                    request.settleReject(error);
+                }
+                break;
+            }
+        } finally {
+            this.uploadedWorkerPumpRunning = false;
+            if (!this.uploadedWorkerPending && this.uploadedWorkerQueue.length) {
+                this.pumpUploadedWorkerQueue();
+            }
         }
-        if (this.uploadedParserFrame?.contentWindow && this.uploadedParserFrameReady) {
+    }
+
+    destroyUploadedWorker(options = {}) {
+        const preserveOrgRequests = options.preserveOrgRequests === true;
+        const isUploadRequest = (request) => request?.type === 'INDEX_FILE' || request?.type === 'PARSE_SCOPE';
+        const queued = this.uploadedWorkerQueue.filter((request) => !preserveOrgRequests || isUploadRequest(request));
+        this.uploadedWorkerQueue = this.uploadedWorkerQueue.filter((request) => preserveOrgRequests && !isUploadRequest(request));
+        const cancelError = new Error('Parsing cancelled.');
+        cancelError.name = 'AbortError';
+        queued.forEach((request) => request.settleReject(cancelError));
+        const pending = this.uploadedWorkerPending;
+        const cancelPending = pending && (!preserveOrgRequests || isUploadRequest(pending));
+        if (cancelPending) {
+            this.uploadedWorkerPending = null;
+            pending.cleanup();
+            pending.sendCancel?.();
+            pending.settleReject(cancelError);
+        }
+        if (!preserveOrgRequests && this.uploadedParserFrame?.contentWindow && this.uploadedParserFrameReady) {
             try {
                 this.uploadedParserFrame.contentWindow.postMessage({
                     channel: 'DML_LOG_PARSER_FRAME_V1',
@@ -1591,7 +1653,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
         if (!file) return;
         const sessionId = ++this.uploadedParseSession;
         this.uploadedAbortController?.abort();
-        this.destroyUploadedWorker();
+        this.destroyUploadedWorker({ preserveOrgRequests: true });
         const uploadAbortController = new AbortController();
         this.uploadedAbortController = uploadAbortController;
         const signal = uploadAbortController.signal;
@@ -1911,6 +1973,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
         let treeResult;
         let detailScope = row.dmlScope;
         let uploadedScopeResult;
+        let workerDetailResult;
         if (row.UploadedFile) {
             uploadedScopeResult = await this.getUploadedScopeResult(row, signal);
             rawLog = uploadedScopeResult.rawLog;
@@ -1924,20 +1987,18 @@ export default class DmlTransactionVisualizer extends LightningElement {
             return;
         }
         row.rawLog = rawLog || '';
-        if (!row.UploadedFile && this.debugLogTrees.has(row.DebugLogId)) {
-            executionTree = this.debugLogTrees.get(row.DebugLogId);
-            this.debugLogTrees.delete(row.DebugLogId);
-            this.debugLogTrees.set(row.DebugLogId, executionTree);
-        } else if (!row.UploadedFile) {
-            executionTree = await buildExecutionTreeAsync(rawLog || '', { chunkSize: 1000, signal });
+        if (!row.UploadedFile) {
+            workerDetailResult = await this.runUploadedWorkerRequest('PARSE_TEXT', {
+                rawLog,
+                mode: 'DETAIL',
+                scope: detailScope
+            }, signal);
+            if (workerDetailResult?.tooLarge) {
+                throw new Error(workerDetailResult.message || 'This Salesforce debug log exceeds the interactive parsing limit.');
+            }
+            executionTree = workerDetailResult?.tree || { type: 'ROOT', children: [] };
+            treeResult = workerDetailResult?.treeResult || { cards: [] };
             this.setDebugLogTree(row.DebugLogId, executionTree);
-        }
-        if (!row.UploadedFile && this.debugLogCardResults.has(row.DebugLogId)) {
-            treeResult = this.debugLogCardResults.get(row.DebugLogId);
-            this.debugLogCardResults.delete(row.DebugLogId);
-            this.debugLogCardResults.set(row.DebugLogId, treeResult);
-        } else if (!row.UploadedFile) {
-            treeResult = await extractDmlCardResult(executionTree, { includeInferredUiSaves: false, signal });
             this.setDebugLogCardResult(row.DebugLogId, treeResult);
         }
         const matchingCard = (treeResult.cards || []).find((card) => {
@@ -1958,11 +2019,11 @@ export default class DmlTransactionVisualizer extends LightningElement {
         }
         this.parsedDebugEvents = row.UploadedFile
             ? (uploadedScopeResult?.debugEvents || [])
-            : await this.parseDebugLog(rawLog || '', detailScope, signal);
+            : (workerDetailResult?.debugEvents || []);
         const debugSteps = this.buildDebugSteps(this.parsedDebugEvents);
         const extractedResult = row.UploadedFile
             ? (uploadedScopeResult?.fieldChanges || { groups: [], flat: [] })
-            : await extractFieldChangesFromDebugLog(rawLog || '', detailScope, { signal });
+            : (workerDetailResult?.fieldChanges || { groups: [], flat: [] });
         const parsedDetail = {
             log: row,
             executionTree,
@@ -1971,7 +2032,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
             fieldChangesGroups: extractedResult.groups || [],
             fieldChangesAvailable: row.UploadedFile
                 ? Boolean(uploadedScopeResult?.fieldChangesAvailable)
-                : (rawLog || '').includes('|VARIABLE_ASSIGNMENT|')
+                : Boolean(workerDetailResult?.fieldChangesAvailable)
         };
         this.fieldGroupPage = 1;
         this.selectedFieldGroupKey = parsedDetail.fieldChangesGroups[0]?.groupKey;
@@ -2372,201 +2433,12 @@ export default class DmlTransactionVisualizer extends LightningElement {
         }));
     }
 
-    async parseDebugLog(rawLog, dmlScope = null, signal = null) {
-        const hasDmlScope = Number.isFinite(dmlScope?.startNanos);
-        const contextLines = (dmlScope?.contextEvents || []).map((contextEvent) => ({
-            line: `${contextEvent.timestampStr || '-'} (${contextEvent.startNanos || 0})|${contextEvent.type}|${contextEvent.detail || ''}`,
-            isContext: true
-        }));
-        const logLines = getScopedLogLines(rawLog, dmlScope).map(({ rawLine, lineIndex }) => ({
-            line: rawLine,
-            lineIndex,
-            isContext: false
-        }));
-        const events = [];
-        let counter = 0;
-        let lastValidationRuleName = null;
-        const lines = [...contextLines, ...logLines];
-        const chunkSize = 1000;
-
-        for (let start = 0; start < lines.length; start += chunkSize) {
-            if (signal?.aborted) {
-                const error = new Error('Parsing cancelled.');
-                error.name = 'AbortError';
-                throw error;
-            }
-            const end = Math.min(start + chunkSize, lines.length);
-            for (const { line, lineIndex, isContext } of lines.slice(start, end)) {
-            if (signal?.aborted) {
-                const error = new Error('Parsing cancelled.');
-                error.name = 'AbortError';
-                throw error;
-            }
-            const timestampNanos = this.extractDebugTimestampNanos(line);
-            if (!isContext && Number.isFinite(dmlScope?.startLine) && lineIndex < dmlScope.startLine) {
-                    continue;
-            }
-            if (!isContext && Number.isFinite(dmlScope?.endLine) && lineIndex > dmlScope.endLine) {
-                continue;
-            }
-            if (!isContext && hasDmlScope && !this.isWithinDmlScope(timestampNanos, dmlScope)) {
-                continue;
-            }
-
-            const parts = line.split('|');
-            const marker = parts.length > 1 ? parts[1] : line;
-            const details = parts.slice(2).join(' | ') || line;
-            let eventConfig;
-            if (line.includes('FATAL_ERROR') || line.includes('EXCEPTION_THROWN')) {
-                eventConfig = { type: 'Error', severity: 'error', iconName: 'utility:error', title: this.cleanDebugMarker(marker), detail: this.cleanDebugDetail(details) };
-            } else if (line.includes('FLOW_')) {
-                eventConfig = { type: 'Flow', severity: /ERROR|FAULT/i.test(line) ? 'error' : 'info', iconName: 'utility:flow', title: this.cleanDebugMarker(marker), detail: this.extractFlowDetail(details) };
-            } else if (line.includes('DML_BEGIN') || line.includes('DML_END')) {
-                eventConfig = this.extractDmlEvent(marker, details, dmlScope);
-            } else if (line.includes('SOQL_EXECUTE_') || line.includes('SOSL_EXECUTE_')) {
-                eventConfig = { type: line.includes('SOSL_') ? 'SOSL' : 'SOQL', severity: 'info', iconName: 'utility:search', title: this.cleanDebugMarker(marker), detail: this.extractSoqlDetail(details) };
-            } else if (line.includes('VALIDATION_') || /FIELD_CUSTOM_VALIDATION_EXCEPTION|REQUIRED_FIELD_MISSING/i.test(line)) {
-                const validation = marker.startsWith('VALIDATION_')
-                    ? this.parseValidationEventDetails(marker, details, lastValidationRuleName)
-                    : null;
-                if (validation?.ruleName) lastValidationRuleName = validation.ruleName;
-                const validationTitle = validation?.ruleName
-                    ? `Validation: ${validation.ruleName}`
-                    : this.cleanDebugMarker(marker);
-                const validationDetail = [
-                    validation ? `Status: ${validation.status}` : null,
-                    validation?.detail || (!validation ? this.cleanDebugDetail(details) : null)
-                ].filter(Boolean).join(' | ');
-                eventConfig = { type: 'Validation', severity: 'warning', iconName: 'utility:warning', title: validationTitle, detail: validationDetail || 'Validation rule detail unavailable' };
-            } else if (line.includes('WF_')) {
-                eventConfig = { type: 'Workflow', severity: 'info', iconName: 'utility:automation', title: this.cleanDebugMarker(marker), detail: this.cleanDebugDetail(details) };
-            } else if (line.includes('METHOD_ENTRY') || line.includes('METHOD_EXIT')) {
-                eventConfig = { type: 'Apex Method', severity: 'info', iconName: 'utility:apex', title: this.cleanDebugMarker(marker), detail: this.extractCodeUnitDetail(details) };
-            } else if (line.includes('CODE_UNIT_STARTED') || line.includes('CODE_UNIT_FINISHED')) {
-                eventConfig = { type: 'Code Unit', severity: 'info', iconName: 'utility:apex', title: this.cleanDebugMarker(marker), detail: this.extractCodeUnitDetail(details) };
-            } else if (line.includes('LIMIT_USAGE_FOR_NS') || line.includes('CUMULATIVE_LIMIT_USAGE')) {
-                eventConfig = { type: 'Limits', severity: 'info', iconName: 'utility:chart', title: this.cleanDebugMarker(marker), detail: this.cleanDebugDetail(details) };
-            }
-            if (!eventConfig) {
-                    continue;
-            }
-            events.push({
-                key: `debug-${counter++}`,
-                ...eventConfig,
-                detail: eventConfig.detail || this.cleanDebugDetail(details),
-                isContext,
-                timestampNanos,
-                rowClass: eventConfig.severity === 'error' ? 'debug-event error' : eventConfig.severity === 'warning' ? 'debug-event warning' : 'debug-event',
-                badgeClass: eventConfig.severity === 'error' ? 'slds-badge slds-theme_error' : eventConfig.severity === 'warning' ? 'slds-badge slds-theme_warning' : 'slds-badge'
-            });
-            }
-            if (end < lines.length) {
-                // Yield between debug-event batches to keep large-detail rendering responsive.
-                // eslint-disable-next-line no-await-in-loop
-                await new Promise((resolve) => {
-                    // eslint-disable-next-line @lwc/lwc/no-async-operation
-                    setTimeout(resolve, 0);
-                });
-            }
-        }
-        return events;
-    }
-
-    isWithinDmlScope(timestampNanos, dmlScope) {
-        if (!Number.isFinite(dmlScope?.startNanos)) {
-            return true;
-        }
-        if (!Number.isFinite(timestampNanos)) {
-            return false;
-        }
-        return timestampNanos >= dmlScope.startNanos &&
-            (!Number.isFinite(dmlScope.endNanos) || timestampNanos <= dmlScope.endNanos);
-    }
-
-    extractDebugTimestampNanos(line) {
-        const match = String(line || '').match(/\((\d+)\)/);
-        return match ? Number(match[1]) : null;
-    }
-
-    extractDmlEvent(marker, details, dmlScope = null) {
-        const isStart = marker === 'DML_BEGIN';
-        const operation = this.extractDebugValue(details, 'Op') || dmlScope?.operation || 'DML';
-        const objectApiName = this.extractDebugValue(details, 'Type') || dmlScope?.objectName || 'Unknown Object';
-        const rows = this.extractDebugValue(details, 'Rows') || dmlScope?.rowCount;
-        return {
-            type: 'DML',
-            severity: 'info',
-            iconName: 'utility:database',
-            title: `${operation} ${objectApiName} ${isStart ? 'started' : 'completed'}`,
-            detail: rows ? `${rows} row(s) affected` : this.cleanDebugDetail(details)
-        };
-    }
-
-    extractSoqlDetail(details) {
-        const entities = this.extractDebugValue(details, 'Aggregations') || this.extractDebugValue(details, 'Rows');
-        const query = details.match(/SELECT\s+.+/i)?.[0];
-        if (query) {
-            return query;
-        }
-        return entities ? `Rows: ${entities}` : this.cleanDebugDetail(details);
-    }
-
-    extractFlowDetail(details) {
-        const flowName = details.match(/Interview Label:\s*([^|]+)/i)?.[1] || details.match(/Flow:\s*([^|]+)/i)?.[1];
-        return flowName ? flowName.trim() : this.cleanDebugDetail(details);
-    }
-
-    extractCodeUnitDetail(details) {
-        const triggerMatch = details.match(/__sfdc_trigger\/([^:|]+)/i);
-        const apexMatch = details.match(/apex:\/\/([^:|]+)/i);
-        if (triggerMatch) {
-            return `Trigger: ${triggerMatch[1]}`;
-        }
-        if (apexMatch) {
-            return `Apex: ${apexMatch[1]}`;
-        }
-        return this.cleanDebugDetail(details);
-    }
-
     extractDebugValue(text, key) {
-        return text.match(new RegExp(`${key}:([^|]+)`, 'i'))?.[1]?.trim();
-    }
-
-    cleanDebugMarker(marker) {
-        return (marker || 'Debug Event').replace(/_/g, ' ');
+        return String(text || '').match(new RegExp(`${key}:([^|]+)`, 'i'))?.[1]?.trim();
     }
 
     cleanDebugDetail(details) {
         return (details || '').replace(/\s+/g, ' ').trim() || '-';
     }
 
-    parseValidationEventDetails(type, detail, previousRuleName = null) {
-        const segments = String(detail || '')
-            .split('|')
-            .map((segment) => segment.trim())
-            .filter(Boolean)
-            .filter((segment) => !/^\[?\d+\]?$/.test(segment));
-        const status = type === 'VALIDATION_PASS'
-            ? 'Passed'
-            : type === 'VALIDATION_FAIL'
-                ? 'Failed'
-                : 'Evaluated';
-        const statusPattern = /^(?:validation\s+)?(?:passed|pass|failed|fail|error|formula\s+evaluated)$/i;
-        const nameSegment = segments.find((segment) => {
-            if (statusPattern.test(segment)) return false;
-            if (type === 'VALIDATION_RULE') return true;
-            return /^[A-Za-z][A-Za-z0-9 _-]*\s*:\s*\S/.test(segment);
-        });
-        let ruleName = nameSegment || previousRuleName || null;
-        if (nameSegment && nameSegment.includes(':')) {
-            const qualifiedName = nameSegment.split(':').slice(1).join(':').trim();
-            if (qualifiedName) ruleName = qualifiedName;
-        }
-        const detailSegments = segments.filter((segment) => segment !== nameSegment);
-        return {
-            ruleName,
-            status,
-            detail: detailSegments.join(' | ') || null
-        };
-    }
 }

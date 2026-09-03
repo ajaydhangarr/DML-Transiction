@@ -77,6 +77,14 @@
                     requestId: message.requestId,
                     scope: message.scope
                 });
+            } else if (message.type === 'PARSE_TEXT') {
+                worker.postMessage({
+                    type: 'PARSE_TEXT',
+                    requestId: message.requestId,
+                    rawLog: message.rawLog,
+                    mode: message.mode,
+                    scope: message.scope
+                });
             }
         } catch (error) {
             send({

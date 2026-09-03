@@ -991,6 +991,188 @@ export async function extractFieldChangesFromDebugLog(rawLog, dmlScope = null, o
   return { groups, flat, defaultStep: flat };
 }
 
+function debugIsWithinDmlScope(timestampNanos, dmlScope) {
+  if (!Number.isFinite(dmlScope?.startNanos)) {
+    return true;
+  }
+  if (!Number.isFinite(timestampNanos)) {
+    return false;
+  }
+  return timestampNanos >= dmlScope.startNanos &&
+    (!Number.isFinite(dmlScope.endNanos) || timestampNanos <= dmlScope.endNanos);
+}
+
+function debugExtractValue(text, key) {
+  return String(text || '').match(new RegExp(`${key}:([^|]+)`, 'i'))?.[1]?.trim();
+}
+
+function debugCleanMarker(marker) {
+  return (marker || 'Debug Event').replace(/_/g, ' ');
+}
+
+function debugCleanDetail(details) {
+  return (details || '').replace(/\s+/g, ' ').trim() || '-';
+}
+
+function debugExtractDmlEvent(marker, details, dmlScope = null) {
+  const isStart = marker === 'DML_BEGIN';
+  const operation = debugExtractValue(details, 'Op') || dmlScope?.operation || 'DML';
+  const objectApiName = debugExtractValue(details, 'Type') || dmlScope?.objectName || 'Unknown Object';
+  const rows = debugExtractValue(details, 'Rows') || dmlScope?.rowCount;
+  return {
+    type: 'DML',
+    severity: 'info',
+    iconName: 'utility:database',
+    title: `${operation} ${objectApiName} ${isStart ? 'started' : 'completed'}`,
+    detail: rows ? `${rows} row(s) affected` : debugCleanDetail(details)
+  };
+}
+
+function debugExtractSoqlDetail(details) {
+  const entities = debugExtractValue(details, 'Aggregations') || debugExtractValue(details, 'Rows');
+  const query = String(details || '').match(/SELECT\s+.+/i)?.[0];
+  if (query) {
+    return query;
+  }
+  return entities ? `Rows: ${entities}` : debugCleanDetail(details);
+}
+
+function debugExtractFlowDetail(details) {
+  const flowName = String(details || '').match(/Interview Label:\s*([^|]+)/i)?.[1] ||
+    String(details || '').match(/Flow:\s*([^|]+)/i)?.[1];
+  return flowName ? flowName.trim() : debugCleanDetail(details);
+}
+
+function debugExtractCodeUnitDetail(details) {
+  const triggerMatch = String(details || '').match(/__sfdc_trigger\/([^:|]+)/i);
+  const apexMatch = String(details || '').match(/apex:\/\/([^:|]+)/i);
+  if (triggerMatch) {
+    return `Trigger: ${triggerMatch[1]}`;
+  }
+  if (apexMatch) {
+    return `Apex: ${apexMatch[1]}`;
+  }
+  return debugCleanDetail(details);
+}
+
+function debugParseValidationEventDetails(type, detail, previousRuleName = null) {
+  const segments = String(detail || '')
+    .split('|')
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .filter((segment) => !/^\[?\d+\]?$/.test(segment));
+  const status = type === 'VALIDATION_PASS'
+    ? 'Passed'
+    : type === 'VALIDATION_FAIL'
+      ? 'Failed'
+      : 'Evaluated';
+  const statusPattern = /^(?:validation\s+)?(?:passed|pass|failed|fail|error|formula\s+evaluated)$/i;
+  const nameSegment = segments.find((segment) => {
+    if (statusPattern.test(segment)) return false;
+    if (type === 'VALIDATION_RULE') return true;
+    return /^[A-Za-z][A-Za-z0-9 _-]*\s*:\s*\S/.test(segment);
+  });
+  let ruleName = nameSegment || previousRuleName || null;
+  if (nameSegment && nameSegment.includes(':')) {
+    const qualifiedName = nameSegment.split(':').slice(1).join(':').trim();
+    if (qualifiedName) ruleName = qualifiedName;
+  }
+  const detailSegments = segments.filter((segment) => segment !== nameSegment);
+  return {
+    ruleName,
+    status,
+    detail: detailSegments.join(' | ') || null
+  };
+}
+
+export async function parseDebugEvents(rawLog, dmlScope = null, options = {}) {
+  if (!rawLog) return [];
+
+  const hasDmlScope = Number.isFinite(dmlScope?.startNanos);
+  const contextLines = (dmlScope?.contextEvents || []).map((contextEvent) => ({
+    line: `${contextEvent.timestampStr || '-'} (${contextEvent.startNanos || 0})|${contextEvent.type}|${contextEvent.detail || ''}`,
+    isContext: true
+  }));
+  const logLines = getScopedLogLines(rawLog, dmlScope).map(({ rawLine, lineIndex }) => ({
+    line: rawLine,
+    lineIndex,
+    isContext: false
+  }));
+  const events = [];
+  let counter = 0;
+  let lastValidationRuleName = null;
+  const lines = [...contextLines, ...logLines];
+  const chunkSize = Math.max(100, options.chunkSize || 1000);
+
+  for (let start = 0; start < lines.length; start += chunkSize) {
+    throwIfAborted(options.signal);
+    const end = Math.min(start + chunkSize, lines.length);
+    for (const { line, lineIndex, isContext } of lines.slice(start, end)) {
+      throwIfAborted(options.signal);
+      const timestampNanos = parseTimestampNanos(line);
+      if (!isContext && Number.isFinite(dmlScope?.startLine) && lineIndex < dmlScope.startLine) continue;
+      if (!isContext && Number.isFinite(dmlScope?.endLine) && lineIndex > dmlScope.endLine) continue;
+      if (!isContext && hasDmlScope && !debugIsWithinDmlScope(timestampNanos, dmlScope)) continue;
+
+      const parts = line.split('|');
+      const marker = parts.length > 1 ? parts[1] : line;
+      const details = parts.slice(2).join(' | ') || line;
+      let eventConfig;
+      if (line.includes('FATAL_ERROR') || line.includes('EXCEPTION_THROWN')) {
+        eventConfig = { type: 'Error', severity: 'error', iconName: 'utility:error', title: debugCleanMarker(marker), detail: debugCleanDetail(details) };
+      } else if (line.includes('FLOW_')) {
+        eventConfig = { type: 'Flow', severity: /ERROR|FAULT/i.test(line) ? 'error' : 'info', iconName: 'utility:flow', title: debugCleanMarker(marker), detail: debugExtractFlowDetail(details) };
+      } else if (line.includes('DML_BEGIN') || line.includes('DML_END')) {
+        eventConfig = debugExtractDmlEvent(marker, details, dmlScope);
+      } else if (line.includes('SOQL_EXECUTE_') || line.includes('SOSL_EXECUTE_')) {
+        eventConfig = { type: line.includes('SOSL_') ? 'SOSL' : 'SOQL', severity: 'info', iconName: 'utility:search', title: debugCleanMarker(marker), detail: debugExtractSoqlDetail(details) };
+      } else if (line.includes('VALIDATION_') || /FIELD_CUSTOM_VALIDATION_EXCEPTION|REQUIRED_FIELD_MISSING/i.test(line)) {
+        const validation = marker.startsWith('VALIDATION_')
+          ? debugParseValidationEventDetails(marker, details, lastValidationRuleName)
+          : null;
+        if (validation?.ruleName) lastValidationRuleName = validation.ruleName;
+        const validationTitle = validation?.ruleName ? `Validation: ${validation.ruleName}` : debugCleanMarker(marker);
+        const validationDetail = [
+          validation ? `Status: ${validation.status}` : null,
+          validation?.detail || (!validation ? debugCleanDetail(details) : null)
+        ].filter(Boolean).join(' | ');
+        eventConfig = { type: 'Validation', severity: 'warning', iconName: 'utility:warning', title: validationTitle, detail: validationDetail || 'Validation rule detail unavailable' };
+      } else if (line.includes('WF_')) {
+        eventConfig = { type: 'Workflow', severity: 'info', iconName: 'utility:automation', title: debugCleanMarker(marker), detail: debugCleanDetail(details) };
+      } else if (line.includes('USER_DEBUG')) {
+        eventConfig = { type: 'Debug Message', severity: 'info', iconName: 'utility:info', title: debugCleanMarker(marker), detail: debugCleanDetail(details) };
+      } else if (line.includes('METHOD_ENTRY') || line.includes('METHOD_EXIT')) {
+        eventConfig = { type: 'Apex Method', severity: 'info', iconName: 'utility:apex', title: debugCleanMarker(marker), detail: debugExtractCodeUnitDetail(details) };
+      } else if (line.includes('CODE_UNIT_STARTED') || line.includes('CODE_UNIT_FINISHED')) {
+        eventConfig = { type: 'Code Unit', severity: 'info', iconName: 'utility:apex', title: debugCleanMarker(marker), detail: debugExtractCodeUnitDetail(details) };
+      } else if (line.includes('LIMIT_USAGE_FOR_NS') || line.includes('CUMULATIVE_LIMIT_USAGE')) {
+        eventConfig = { type: 'Limits', severity: 'info', iconName: 'utility:chart', title: debugCleanMarker(marker), detail: debugCleanDetail(details) };
+      }
+      if (!eventConfig) continue;
+      events.push({
+        key: `debug-${counter++}`,
+        ...eventConfig,
+        detail: eventConfig.detail || debugCleanDetail(details),
+        isContext,
+        timestampNanos,
+        rowClass: eventConfig.severity === 'error' ? 'debug-event error' : eventConfig.severity === 'warning' ? 'debug-event warning' : 'debug-event',
+        badgeClass: eventConfig.severity === 'error'
+          ? 'slds-badge slds-theme_error'
+          : eventConfig.severity === 'warning'
+            ? 'slds-badge slds-theme_warning'
+            : 'slds-badge'
+      });
+    }
+    if (end < lines.length) {
+      // Keep long debug-event batches cooperative without blocking the caller.
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToBrowser();
+      throwIfAborted(options.signal);
+    }
+  }
+  return events;
+}
+
 export async function extractDmlCards(rootNode, options = { includeInferredUiSaves: true }) {
   const result = await extractDmlCardResult(rootNode, options);
   return result.cards;
