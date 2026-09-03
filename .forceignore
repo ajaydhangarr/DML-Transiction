@@ -12,3 +12,6 @@ package.xml
 **/__tests__/**
 
 node_modules/
+
+# Subscriber org profiles are not part of the AppExchange package.
+force-app/main/default/profiles/
