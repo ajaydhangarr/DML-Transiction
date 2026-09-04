@@ -40,15 +40,7 @@ const SYSTEM_METADATA_OBJECTS = new Set([
   'FlowInterview',
   'TraceFlag',
   'DebugLevel',
-  'TXN_Log_Event__e',
-  'TXN_Step_Log_Event__e',
-  'TXN_Field_Change_Event__e',
-  'TXN_Log__c',
-  'TXN_Step__c',
-  'TXN_Field_Change__c',
-  'Log_Index__c',
   'DebugLogController',
-  'DMLTransactionVisualizerApex',
   'Unknown Object'
 ]);
 

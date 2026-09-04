@@ -1,8 +1,6 @@
 import { LightningElement, track } from 'lwc';
 import { ShowToastEvent } from 'lightning/platformShowToastEvent';
 import dmlLogParserFrameUrl from '@salesforce/resourceUrl/dmlLogParserFrame';
-import getTransactionDetail from '@salesforce/apex/DMLTransactionVisualizerApex.getTransactionDetail';
-import deleteTransactions from '@salesforce/apex/DMLTransactionVisualizerApex.deleteTransactions';
 import getQueueLogs from '@salesforce/apex/DebugLogController.getQueueLogs';
 import fetchLogBody from '@salesforce/apex/DebugLogController.fetchLogBody';
 import {
@@ -51,8 +49,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
     detailRequestToken = 0;
     detailLoadingToken = 0;
     detailAbortController = null;
-    selectedQueueIds = [];
-    isQueueDeleteMode = false;
     @track filters = { objectName: 'All', status: 'All', dmlType: 'All' };
     uploadState = 'idle';
     uploadProgress = 0;
@@ -273,21 +269,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
             return 'Technical logger activity was excluded. No business-object DML was found in the scanned logs.';
         }
         return 'The scanned logs did not contain a business-object DML event. Check the trace flag and run the transaction again.';
-    }
-
-    get selectedQueueCount() {
-        return this.selectedQueueIds.length;
-    }
-
-    get hasSelectedQueueItems() {
-        return this.selectedQueueCount > 0;
-    }
-
-    get selectedDeleteLabel() {
-        if (!this.isQueueDeleteMode) {
-            return 'Select Delete';
-        }
-        return this.selectedQueueCount > 1 ? `Delete ${this.selectedQueueCount} selected` : 'Delete selected';
     }
 
     get steps() {
@@ -893,8 +874,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.debugLogCardResults.clear();
             this.detailCache.clear();
             this.parsedDebugEvents = [];
-            this.selectedQueueIds = [];
-            this.isQueueDeleteMode = false;
             this.blockedLogCount = 0;
             this.scanPendingCount = 0;
             this.queueStats = { logCount: 0, businessCardCount: 0, confirmedDmlCount: 0, internalDmlCount: 0 };
@@ -1182,7 +1161,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
                 rowCountLabel: row.rowCount ? `${row.rowCount} row(s)` : (row.rowCountLabel || 'DML Event'),
                 durationLabel: row.durationLabel || `${row.durationMs || 0} ms`,
                 itemClass: isSelected ? 'queue-item selected' : 'queue-item',
-                checked: this.selectedQueueIds.includes(row.Transaction_Id__c),
+                checked: false,
                 badgeClass: row.Status__c === 'Failed' ? 'slds-badge slds-theme_error' : 'slds-badge slds-theme_success'
             };
         });
@@ -1551,74 +1530,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
         this.selectedHealthEventKey = this.selectedHealthEventKey === eventKey ? null : eventKey;
     }
 
-    handleQueueCheckbox(event) {
-        event.stopPropagation();
-        if (!this.isQueueDeleteMode) {
-            return;
-        }
-        const transactionId = event.target.dataset.id;
-        if (!transactionId) {
-            return;
-        }
-        const selected = new Set(this.selectedQueueIds);
-        if (event.target.checked) {
-            selected.add(transactionId);
-        } else {
-            selected.delete(transactionId);
-        }
-        this.selectedQueueIds = Array.from(selected);
-        this.transactions = this.transactions.map((row) => ({
-            ...row,
-            checked: this.selectedQueueIds.includes(row.Transaction_Id__c)
-        }));
-    }
-
-    handleQueueAction(event) {
-        const action = event.detail.value;
-        if (action === 'deleteSelected') {
-            if (!this.isQueueDeleteMode) {
-                this.isQueueDeleteMode = true;
-                return;
-            }
-            this.deleteSelectedTransactions();
-        }
-    }
-
-    handleRowAction(event) {
-        event.stopPropagation();
-        if (event.detail.value === 'delete') {
-            const transactionId = event.currentTarget.dataset.id;
-            this.deleteTransactionIds([transactionId]);
-        }
-    }
-
-    async deleteSelectedTransactions() {
-        await this.deleteTransactionIds(this.selectedQueueIds);
-    }
-
-    async deleteTransactionIds(transactionIds) {
-        const ids = (transactionIds || []).filter((value) => value);
-        if (!ids.length) {
-            this.showToast('No transactions selected', 'Select one or more transactions to delete.', 'warning');
-            return;
-        }
-        const loadingToken = this.beginGlobalLoading();
-        try {
-            await deleteTransactions({ transactionIds: ids });
-            if (ids.includes(this.selectedId)) {
-                this.clearSelectedTransaction();
-            }
-            this.selectedQueueIds = [];
-            this.isQueueDeleteMode = false;
-            await this.loadTransactions({ forceReload: true });
-            this.showToast('Deleted', `${ids.length} transaction(s) deleted from the queue.`, 'success');
-        } catch (error) {
-            this.showToast('Delete failed', error?.body?.message || error?.message || 'Unable to delete selected transactions.', 'error');
-        } finally {
-            this.endGlobalLoading(loadingToken);
-        }
-    }
-
     showToast(title, message, variant) {
         this.dispatchEvent(new ShowToastEvent({ title, message, variant }));
     }
@@ -1628,11 +1539,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.clearSelectedTransaction();
             return;
         }
-        if (row.IsDebugLog) {
-            await this.loadDebugTransactionDetail(row, preserveStepSelection);
-            return;
-        }
-        await this.loadTransactionDetail(row.Transaction_Id__c, preserveStepSelection);
+        await this.loadDebugTransactionDetail(row, preserveStepSelection);
     }
 
     async getUploadedScopeResult(row, signal) {
@@ -1810,30 +1717,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.debugLogCardResults.delete(this.debugLogCardResults.keys().next().value);
         }
         this.debugLogCardResults.set(logId, result);
-    }
-
-    async loadTransactionDetail(transactionId, preserveStepSelection = false) {
-        if (!transactionId) {
-            this.clearSelectedTransaction();
-            return;
-        }
-        const requestToken = ++this.detailRequestToken;
-        this.selectedId = transactionId;
-        this.selectedHealthEventKey = null;
-        const priorStepId = preserveStepSelection ? this.selectedStepId : null;
-        const detail = await this.withTimeout(
-            getTransactionDetail({ transactionId }),
-            REMOTE_REQUEST_TIMEOUT_MS,
-            'Loading transaction details took too long. Please select the transaction again.'
-        );
-        if (requestToken !== this.detailRequestToken || this.selectedId !== transactionId) {
-            return;
-        }
-        this.detail = detail;
-        const loadedSteps = this.detail.steps || [];
-        const priorStep = loadedSteps.find((step) => step.Id === priorStepId);
-        const failedStep = loadedSteps.find((step) => step.Status__c === 'Failed');
-        this.selectedStepId = priorStep?.Id || failedStep?.Id || loadedSteps[0]?.Id;
     }
 
     clearSelectedTransaction() {

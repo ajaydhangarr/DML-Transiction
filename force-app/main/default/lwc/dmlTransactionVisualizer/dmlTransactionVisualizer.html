@@ -80,17 +80,6 @@
                     <div class="queue-list">
                         <template for:each={visibleTransactions} for:item="txn">
                             <article key={txn.Transaction_Id__c} class={txn.itemClass}>
-                                <template if:true={isQueueDeleteMode}>
-                                    <div class="queue-item-select">
-                                    <lightning-input
-                                        type="checkbox"
-                                        variant="label-hidden"
-                                        checked={txn.checked}
-                                        data-id={txn.Transaction_Id__c}
-                                        onchange={handleQueueCheckbox}>
-                                    </lightning-input>
-                                    </div>
-                                </template>
                                 <button class="queue-item-body" data-id={txn.Transaction_Id__c} onclick={handleSelect}>
                                     <span class="queue-row-top">
                                         <span class={txn.operationBadgeClass}>{txn.DML_Type__c}</span>
