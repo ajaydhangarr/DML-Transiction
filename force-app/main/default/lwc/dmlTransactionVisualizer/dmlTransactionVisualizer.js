@@ -304,22 +304,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
         return this.steps;
     }
 
-    get hasVisibleSteps() {
-        return this.visibleSteps.length > 0;
-    }
-
-    get selectedStep() {
-        if (!this.selectedStepId && this.steps.length) {
-            return this.steps.find((step) => step.Status__c === 'Failed') || this.steps[0];
-        }
-        return this.steps.find((step) => step.Id === this.selectedStepId);
-    }
-
-    get executionSummary() {
-        const failed = this.steps.filter((step) => step.Status__c === 'Failed').length;
-        return `${this.steps.length} steps / ${failed} failed / ${this.sumStepField('CPU_Time_Used_ms__c')} ms CPU`;
-    }
-
     get fieldChanges() {
         const changes = [];
         const grouped = this.detail.changesByStepId || {};
@@ -420,15 +404,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
     @track isDebugOnly = false;
     @track expandState = null;
 
-    handleExpandAll() {
-        this.expandState = 'ALL';
-        // Reset the one-shot child command after it has rendered.
-        // eslint-disable-next-line @lwc/lwc/no-async-operation
-        setTimeout(() => {
-            this.expandState = null;
-        }, 100);
-    }
-
     handleCollapseAll() {
         this.expandState = 'NONE';
         // Reset the one-shot child command after it has rendered.
@@ -483,17 +458,13 @@ export default class DmlTransactionVisualizer extends LightningElement {
         return filter(actionList);
     }
 
-    get hasDebugLogs() {
-        return this.debugLogs.length > 0;
-    }
-
-    get hasParsedDebugEvents() {
-        return this.parsedDebugEvents.length > 0;
-    }
-
 
     get isFailed() {
         return this.detail.log?.Status__c === 'Failed';
+    }
+
+    get isLogTruncated() {
+        return Boolean(this.detail?.executionTree?.isTruncated || this.detail?.log?.isTruncated);
     }
 
     get detailStatusClass() {
@@ -601,20 +572,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
 
     get hasHealthErrors() {
         return this.failedHealthEvents.length > 0;
-    }
-
-    get healthErrorTitle() {
-        const firstError = this.failedHealthEvents[0];
-        return firstError ? `${firstError.label} failed` : '';
-    }
-
-    get healthErrorDetail() {
-        const firstError = this.failedHealthEvents[0];
-        if (!firstError) {
-            return '';
-        }
-        const moreCount = this.failedHealthEvents.length - 1;
-        return moreCount > 0 ? `${firstError.detail} + ${moreCount} more issue(s)` : firstError.detail;
     }
 
     get importantEvents() {
@@ -1743,24 +1700,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
         return `${this.toNumber(value)} ms`;
     }
 
-    formatTime(value) {
-        if (!value) return '';
-        const strVal = String(value).trim();
-        const match = strVal.match(/\b(\d{2}:\d{2}:\d{2})\b/);
-        if (match) {
-            return match[1];
-        }
-        try {
-            const dt = new Date(strVal.replace(' ', 'T'));
-            if (!isNaN(dt.getTime())) {
-                return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-            }
-        } catch {
-            // ignore
-        }
-        return strVal;
-    }
-
     formatTimestamp(value) {
         if (!value) return '-';
         const strVal = String(value).trim();
@@ -1781,17 +1720,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
             // fall through to raw string
         }
         return strVal;
-    }
-
-    formatBytes(value) {
-        const bytes = this.toNumber(value);
-        if (bytes >= 1000000) {
-            return `${(bytes / 1000000).toFixed(1)} MB`;
-        }
-        if (bytes >= 1000) {
-            return `${(bytes / 1000).toFixed(1)} KB`;
-        }
-        return `${bytes} B`;
     }
 
     toNumber(value) {
@@ -1884,81 +1812,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
         return true;
     }
 
-    analyzeLogSummary(log, rawLog) {
-        const lines = rawLog.split(/\r?\n/);
-        const dmlLine = lines.find((line) => line.includes('DML_BEGIN'));
-        if (!dmlLine) {
-            return null;
-        }
-        const parts = dmlLine.split('|');
-        const details = parts.slice(2).join(' | ') || dmlLine;
-        const dmlType = this.normalizeDmlValue(this.extractDebugValue(details, 'Op'));
-        const objectApiName = this.extractDebugValue(details, 'Type');
-        if (!objectApiName) {
-            return null;
-        }
-        const errorLine = lines.find((line) => (
-            line.includes('EXCEPTION_THROWN') ||
-            line.includes('FATAL_ERROR') ||
-            line.includes('FIELD_CUSTOM_VALIDATION_EXCEPTION') ||
-            line.includes('REQUIRED_FIELD_MISSING')
-        ));
-        const importantCount = lines.filter((line) => this.isImportantDebugLine(line)).length;
-        return {
-            Id: log.Id,
-            DebugLogId: log.Id,
-            Transaction_Id__c: `LOG-${log.Id}`,
-            Object_API_Name__c: objectApiName,
-            DML_Type__c: dmlType || 'Unknown',
-            Triggered_By__c: log.LogUserName,
-            Triggered_By_Id__c: null,
-            Status__c: log.Status === 'Success' && !errorLine ? 'Success' : 'Failed',
-            Total_Steps__c: importantCount,
-            Total_Duration_ms__c: 0,
-            Start_Time__c: log.StartTime,
-            End_Time__c: log.StartTime,
-            Record_Ids__c: null,
-            Error_Message__c: errorLine ? this.cleanDebugDetail(errorLine).slice(0, 255) : null,
-            IsDebugLog: true
-        };
-    }
-
-    isImportantDebugLine(line) {
-        return line.includes('DML_BEGIN') ||
-            line.includes('DML_END') ||
-            line.includes('SOQL_EXECUTE_BEGIN') ||
-            line.includes('SOSL_EXECUTE_BEGIN') ||
-            line.includes('FLOW_START_INTERVIEW') ||
-            line.includes('FLOW_ELEMENT_ERROR') ||
-            line.includes('CODE_UNIT_STARTED') ||
-            line.includes('LIMIT_USAGE_FOR_NS') ||
-            line.includes('CUMULATIVE_LIMIT_USAGE') ||
-            line.includes('EXCEPTION_THROWN') ||
-            line.includes('FATAL_ERROR') ||
-            line.includes('FIELD_CUSTOM_VALIDATION_EXCEPTION') ||
-            line.includes('REQUIRED_FIELD_MISSING');
-    }
-
-    normalizeDmlValue(value) {
-        if (!value) {
-            return null;
-        }
-        const normalized = value.toLowerCase();
-        if (normalized === 'insert') {
-            return 'Insert';
-        }
-        if (normalized === 'update') {
-            return 'Update';
-        }
-        if (normalized === 'delete') {
-            return 'Delete';
-        }
-        if (normalized === 'undelete') {
-            return 'Undelete';
-        }
-        return value;
-    }
-
     async fetchDebugLogBody(logId) {
         try {
             return await this.withTimeout(
@@ -2000,25 +1853,6 @@ export default class DmlTransactionVisualizer extends LightningElement {
         }
         this.debugLogBodies.set(logId, rawLog || '');
         return rawLog || '';
-    }
-
-    normalizeDebugTransaction(row) {
-        return {
-            ...row,
-            Transaction_Id__c: row.transactionId,
-            Object_API_Name__c: row.objectApiName,
-            DML_Type__c: row.dmlType,
-            Triggered_By__c: row.triggeredBy,
-            Triggered_By_Id__c: row.triggeredById,
-            Status__c: row.status,
-            Total_Steps__c: row.totalSteps,
-            Total_Duration_ms__c: row.totalDurationMs,
-            Start_Time__c: row.startTime,
-            End_Time__c: row.endTime,
-            Record_Ids__c: row.recordIds,
-            Error_Message__c: row.errorMessage,
-            IsDebugLog: true
-        };
     }
 
     buildDebugSteps(events) {

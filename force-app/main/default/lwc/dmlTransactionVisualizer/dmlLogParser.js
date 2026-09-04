@@ -64,77 +64,6 @@ function durationInMs(startNanos, endNanos) {
   return ((endNanos - startNanos) / 1000000).toFixed(2);
 }
 
-export function buildExecutionTree(rawLog) {
-  if (!rawLog) {
-    return { type: 'ROOT', children: [], isTruncated: false };
-  }
-
-  const isTruncated = rawLog.includes('*** MAXIMUM DEBUG LOG SIZE REACHED ***');
-  const lines = rawLog.split(/\r?\n/);
-  const root = { type: 'ROOT', children: [], isTruncated };
-  const stack = [root];
-  let sequence = 0;
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const rawLine = lines[lineIndex];
-    if (!rawLine.trim()) continue;
-
-    const parts = rawLine.split('|');
-    if (parts.length < 2) continue;
-
-    const eventType = parts[1].trim();
-    const eventNanos = parseTimestampNanos(parts[0]);
-
-    // Closing event -> pop matching node from stack with generalized incomplete handling
-    const isClosing = Object.values(BEGIN_END_MAP).includes(eventType);
-    if (isClosing) {
-      let matchIndex = -1;
-      for (let i = stack.length - 1; i > 0; i--) {
-        if (BEGIN_END_MAP[stack[i].type] === eventType) {
-          matchIndex = i;
-          break;
-        }
-      }
-
-      if (matchIndex !== -1) {
-        for (let i = stack.length - 1; i > matchIndex; i--) {
-          stack[i].incomplete = true;
-          stack[i].endNanos = eventNanos;
-        }
-        stack[matchIndex].endNanos = eventNanos;
-        stack.length = matchIndex;
-      }
-      continue;
-    }
-
-    if (!Object.prototype.hasOwnProperty.call(BEGIN_END_MAP, eventType) && !SINGLE_LINE_EVENTS.has(eventType)) {
-      continue;
-    }
-
-    const node = {
-      type: eventType,
-      raw: rawLine,
-      detail: parts.slice(2).join('|'),
-      startNanos: eventNanos,
-      timestampStr: parseTimestampString(parts[0]),
-      sequence: sequence += 1,
-      children: []
-    };
-    stack[stack.length - 1].children.push(node);
-
-    if (Object.prototype.hasOwnProperty.call(BEGIN_END_MAP, eventType)) {
-      stack.push(node);
-    }
-  }
-
-  for (let index = 1; index < stack.length; index += 1) {
-    stack[index].incomplete = true;
-  }
-
-  captureUiSaveCandidates(root);
-  pruneEmptyNodes(root);
-  return root;
-}
 
 function yieldToBrowser() {
   return new Promise((resolve) => {
@@ -241,96 +170,6 @@ export async function buildExecutionTreeAsync(rawLog, options = {}) {
   return root;
 }
 
-// File-upload parser. It keeps only the current partial line between chunks,
-// so callers do not need to split a multi-megabyte file into one giant array.
-export function createExecutionTreeStreamState() {
-  return {
-    root: { type: 'ROOT', children: [], isTruncated: false },
-    stack: null,
-    carry: '',
-    lineIndex: 0,
-    sequence: 0,
-    truncated: false
-  };
-}
-
-function consumeExecutionTreeLine(state, rawLine) {
-  if (!rawLine || !rawLine.trim()) return;
-  if (rawLine.includes('*** MAXIMUM DEBUG LOG SIZE REACHED ***')) {
-    state.truncated = true;
-  }
-  const parts = rawLine.split('|');
-  if (parts.length < 2) return;
-  const eventType = parts[1].trim();
-  const eventNanos = parseTimestampNanos(parts[0]);
-  const closingEvents = Object.values(BEGIN_END_MAP);
-
-  if (closingEvents.includes(eventType)) {
-    let matchIndex = -1;
-    for (let index = state.stack.length - 1; index > 0; index -= 1) {
-      if (BEGIN_END_MAP[state.stack[index].type] === eventType) {
-        matchIndex = index;
-        break;
-      }
-    }
-    if (matchIndex !== -1) {
-      for (let index = state.stack.length - 1; index > matchIndex; index -= 1) {
-        state.stack[index].incomplete = true;
-        state.stack[index].endNanos = eventNanos;
-        state.stack[index].endLine = state.lineIndex;
-      }
-      state.stack[matchIndex].endNanos = eventNanos;
-      state.stack[matchIndex].endLine = state.lineIndex;
-      state.stack.length = matchIndex;
-    }
-    return;
-  }
-
-  if (!Object.prototype.hasOwnProperty.call(BEGIN_END_MAP, eventType) && !SINGLE_LINE_EVENTS.has(eventType)) return;
-  const node = {
-    type: eventType,
-    raw: rawLine,
-    detail: parts.slice(2).join('|'),
-    startNanos: eventNanos,
-    timestampStr: parseTimestampString(parts[0]),
-    sequence: state.sequence += 1,
-    startLine: state.lineIndex,
-    children: []
-  };
-  state.stack[state.stack.length - 1].children.push(node);
-  if (Object.prototype.hasOwnProperty.call(BEGIN_END_MAP, eventType)) state.stack.push(node);
-}
-
-export function consumeExecutionTreeStream(state, chunkText, isFinal = false) {
-  if (!state.stack) state.stack = [state.root];
-  const text = `${state.carry || ''}${chunkText || ''}`;
-  const lines = text.split(/\r?\n/);
-  state.carry = isFinal ? '' : (lines.pop() || '');
-  for (const line of lines) {
-    consumeExecutionTreeLine(state, line);
-    state.lineIndex += 1;
-  }
-  if (isFinal && state.carry) {
-    consumeExecutionTreeLine(state, state.carry);
-    state.lineIndex += 1;
-    state.carry = '';
-  }
-  state.root.isTruncated = state.truncated;
-  return state;
-}
-
-export function finishExecutionTreeStream(state) {
-  if (!state.stack) state.stack = [state.root];
-  if (state.carry) consumeExecutionTreeStream(state, '', true);
-  for (let index = 1; index < state.stack.length; index += 1) {
-    state.stack[index].incomplete = true;
-    state.stack[index].endLine = Math.max(0, state.lineIndex - 1);
-  }
-  captureUiSaveCandidates(state.root);
-  pruneEmptyNodes(state.root);
-  return state.root;
-}
-
 const WORK_EVENT_TYPES = new Set([
   'DML_BEGIN',
   'SOQL_EXECUTE_BEGIN',
@@ -429,7 +268,7 @@ function statusFor(node) {
   return treeHasError(node) ? 'Failed' : 'Success';
 }
 
-export function isInternalLoggingObject(objectName) {
+function isInternalLoggingObject(objectName) {
   if (!objectName) return true;
   const name = String(objectName).trim();
   if (SYSTEM_METADATA_OBJECTS.has(name)) return true;
@@ -1006,7 +845,7 @@ function parseValidationEventDetails(type, detail, previousRuleName = null) {
   };
 }
 
-export function summarizeChildren(children, parentId = 'root', depth = 1, previousValidationRule = null) {
+function summarizeChildren(children, parentId = 'root', depth = 1, previousValidationRule = null) {
   if (!children?.length) {
     return [];
   }
