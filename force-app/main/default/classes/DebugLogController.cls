@@ -161,23 +161,27 @@ public with sharing class DebugLogController {
 
     @AuraEnabled
     public static QueueResponse getQueueLogs() {
-        Id currentUserId = UserInfo.getUserId();
-        QueueResponse response = new QueueResponse();
-        List<ApexLog> recentLogs = [
-            SELECT Id, Operation, Status, StartTime, LogUserId, LogUser.Name,
-                   LogLength, Request, Application
-            FROM ApexLog
-            WHERE LogUserId = :currentUserId
-            ORDER BY StartTime DESC
-            LIMIT :RECENT_LOG_SCAN_LIMIT
-        ];
-        for (ApexLog log : recentLogs) {
-            if (isToolingApiNoise(log)) {
-                continue;
+        try {
+            Id currentUserId = UserInfo.getUserId();
+            QueueResponse response = new QueueResponse();
+            List<ApexLog> recentLogs = [
+                SELECT Id, Operation, Status, StartTime, LogUserId, LogUser.Name,
+                       LogLength, Request, Application
+                FROM ApexLog
+                WHERE LogUserId = :currentUserId
+                ORDER BY StartTime DESC
+                LIMIT :RECENT_LOG_SCAN_LIMIT
+            ];
+            for (ApexLog log : recentLogs) {
+                if (isToolingApiNoise(log)) {
+                    continue;
+                }
+                response.pendingLogs.add(queueWrapper(log));
             }
-            response.pendingLogs.add(queueWrapper(log));
+            return response;
+        } catch (Exception ex) {
+            throw new AuraHandledException('Unable to load recent Apex debug logs. Please try again.');
         }
-        return response;
     }
 
     /**
@@ -297,13 +301,13 @@ public with sharing class DebugLogController {
             throw new AuraHandledException('Debug log was not found for the current user.');
         }
         if (accessibleLogs[0].LogLength != null && accessibleLogs[0].LogLength > MAX_FETCHABLE_LOG_BYTES) {
-            throw new AuraHandledException('LOG_TOO_LARGE: This debug log is too large for interactive parsing.');
+            throw new AuraHandledException('This debug log is too large for interactive parsing.');
         }
 
         try {
             return fetchLogBodyInternal(logId);
-        } catch (CalloutException ex) {
-            throw new AuraHandledException('Unable to fetch debug log body. Check the DML_Tooling Named Credential. ' + ex.getMessage());
+        } catch (Exception ex) {
+            throw new AuraHandledException('Unable to fetch this debug log from Salesforce. Please try again.');
         }
     }
 
@@ -439,7 +443,7 @@ public with sharing class DebugLogController {
         if (response.getStatusCode() >= 200 && response.getStatusCode() < 300) {
             return response.getBody();
         }
-        throw new AuraHandledException('Unable to fetch debug log body. Status ' + response.getStatusCode() + ': ' + response.getBody());
+        throw new AuraHandledException('Unable to fetch this debug log from Salesforce. Please try again.');
     }
 
     private static DebugTransactionWrapper analyzeLog(ApexLog log, String body) {

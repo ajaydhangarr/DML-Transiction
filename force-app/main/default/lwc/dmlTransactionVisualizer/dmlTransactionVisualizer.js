@@ -10,7 +10,7 @@ import {
     getScopedLogLines
 } from './dmlLogParser.js';
 
-const MAX_FETCHABLE_LOG_BYTES = 6000000;
+const MAX_FETCHABLE_LOG_BYTES = 5000000;
 const MAX_UPLOAD_BYTES = 60000000;
 const MAX_RAW_LOG_CACHE_ENTRIES = 2;
 const MAX_DETAIL_CACHE_ENTRIES = 8;
@@ -490,7 +490,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
     }
 
     get selectedCardRowCountLabel() {
-        const count = this.selectedCard?.rowCount || this.detail?.log?.rowCount || 1;
+        const count = this.selectedCard?.rowCount ?? this.detail?.log?.rowCount ?? 1;
         return `${count} Record${count > 1 ? 's' : ''}`;
     }
 
@@ -524,12 +524,12 @@ export default class DmlTransactionVisualizer extends LightningElement {
     }
 
     get governorSoqlLabel() {
-        const used = this.sumStepField('SOQL_Queries_Used__c');
+        const used = this.sumStepField('SOQL_Queries_Used__c') ?? 0;
         return `${used} / 100`;
     }
 
     get governorDmlLabel() {
-        const used = this.sumStepField('DML_Statements_Used__c') || 1;
+        const used = this.sumStepField('DML_Statements_Used__c') ?? 0;
         return `${used} / 150`;
     }
 
@@ -894,7 +894,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.transactions = [];
             this.queueStats = { logCount: 0, businessCardCount: 0, confirmedDmlCount: 0, internalDmlCount: 0 };
             this.syncObjectOptions([]);
-            this.debugLogError = error?.body?.message || error?.message || 'We could not load recent Apex debug logs. Please click Refresh and try again.';
+            this.debugLogError = this.getRemoteErrorMessage(error, 'We could not load recent Apex debug logs. Please click Refresh and try again.');
         } finally {
             if (sessionId === this.scanSessionId && this.scanPendingCount === 0) {
                 this.queueLoading = false;
@@ -916,7 +916,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
             await Promise.all([worker(), worker()]);
         } catch (error) {
             if (sessionId === this.scanSessionId && !signal?.aborted) {
-                this.debugLogError = error?.message || 'Scanning stopped before all recent logs could be checked. Please click Refresh and try again.';
+                this.debugLogError = this.getRemoteErrorMessage(error, 'Scanning stopped before all recent logs could be checked. Please click Refresh and try again.');
             }
         } finally {
             if (sessionId === this.scanSessionId && !signal?.aborted) {
@@ -950,7 +950,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
                 dmlIndex: index,
                 objectName: card.Object_API_Name__c,
                 operation: card.DML_Type__c,
-                rows: card.rowCount || 1,
+                rows: card.rowCount ?? 1,
                 isBusinessObject: card.isConfirmed !== false,
                 status: card.Status__c,
                 timestamp: card.timestampStr,
@@ -979,7 +979,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
             }
         } catch (error) {
             if (error?.name === 'AbortError' || signal?.aborted) return;
-            const message = error?.body?.message || error?.message || 'Unable to scan debug log.';
+            const message = this.getRemoteErrorMessage(error, 'Unable to scan this debug log.');
             if (sessionId === this.scanSessionId) {
                 this.debugLogError = `This Apex debug log could not be analyzed. ${message}`;
                 this.blockedLogCount += 1;
@@ -1048,6 +1048,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
     createDmlSummaryRow(log) {
         const operation = log.DmlType || log.Operation || 'DML';
         const objectName = log.DmlObjectName || 'Object';
+        const rowCount = log.DmlRows === null || log.DmlRows === undefined || !Number.isFinite(Number(log.DmlRows)) ? 1 : Number(log.DmlRows);
         const dmlIndex = Number.isFinite(Number(log.DmlIndex)) ? Number(log.DmlIndex) : 0;
         const displayIndex = dmlIndex + 1;
         const transactionId = `LOG-${log.Id}-DML-${displayIndex}`;
@@ -1088,7 +1089,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
                 endLine: Number.isFinite(Number(log.DmlEndLine)) ? Number(log.DmlEndLine) : null,
                 objectName,
                 operation,
-                rowCount: Number(log.DmlRows) || 1,
+                rowCount,
                 startByte,
                 endByte,
                 contextEvents: Array.isArray(log.DmlContextEvents) ? log.DmlContextEvents : []
@@ -1115,7 +1116,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
                 timeLabel,
                 displayTime: timeLabel,
                 operationBadgeClass: this.getOperationBadgeClass(operation),
-                rowCountLabel: row.rowCount ? `${row.rowCount} row(s)` : (row.rowCountLabel || 'DML Event'),
+                rowCountLabel: row.rowCount !== null && row.rowCount !== undefined ? `${row.rowCount} row(s)` : (row.rowCountLabel || 'DML Event'),
                 durationLabel: row.durationLabel || `${row.durationMs || 0} ms`,
                 itemClass: isSelected ? 'queue-item selected' : 'queue-item',
                 checked: false,
@@ -1412,7 +1413,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
         } catch (error) {
             if (error?.name === 'AbortError' || sessionId !== this.uploadedParseSession) return;
             this.uploadState = 'error';
-            this.uploadMessage = error?.message || 'We could not read this file as a Salesforce Apex debug log.';
+            this.uploadMessage = this.getParserErrorMessage(error, 'We could not read this file as a Salesforce Apex debug log.');
             this.showToast('Unable to parse file', this.uploadMessage, 'error');
         } finally {
             this.endGlobalLoading(loadingToken);
@@ -1450,7 +1451,7 @@ export default class DmlTransactionVisualizer extends LightningElement {
             this.transactions = this.formatQueueRows(this.rawTransactionRows || this.transactions);
         } catch (error) {
             if (error?.name === 'AbortError') return;
-            const message = error?.body?.message || error?.message || 'We could not load this transaction\'s details. Please select it again.';
+            const message = this.getRemoteErrorMessage(error, 'We could not load this transaction\'s details. Please select it again.');
             this.debugLogError = message;
             this.showToast('Transaction details unavailable', message, 'error');
         } finally {
@@ -1820,8 +1821,25 @@ export default class DmlTransactionVisualizer extends LightningElement {
                 'Loading the Apex debug log took too long. Please click Refresh and try again.'
             );
         } catch (error) {
-            throw new Error(error?.body?.message || error?.message || 'We could not load the Apex debug log body. Please try again.');
+            throw new Error(this.getRemoteErrorMessage(error, 'We could not load the Apex debug log body. Please try again.'));
         }
+    }
+
+    getRemoteErrorMessage(error, fallback) {
+        const raw = String(error?.body?.message || error?.message || '');
+        if (/too large|LOG_TOO_LARGE/i.test(raw)) {
+            return 'This debug log is too large for interactive parsing.';
+        }
+        if (/not found for the current user/i.test(raw)) {
+            return 'This debug log is no longer available for the current user.';
+        }
+        return fallback;
+    }
+
+    getParserErrorMessage(error, fallback) {
+        const raw = String(error?.message || '');
+        const safeParserMessage = /^(This file is larger than|This Apex debug log exceeds|The uploaded file is no longer available|The local log parser|Local log parsing|Another file is still being parsed|We could not read this file)/i;
+        return safeParserMessage.test(raw) ? raw : fallback;
     }
 
     withTimeout(promise, timeoutMs, message) {
