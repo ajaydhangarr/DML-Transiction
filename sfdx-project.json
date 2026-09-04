@@ -6,7 +6,7 @@
     }
   ],
   "name": "dml visualizer",
-  "namespace": "",
+  "namespace": "dmlviz",
   "sfdcLoginUrl": "https://login.salesforce.com",
   "sourceApiVersion": "67.0"
 }
