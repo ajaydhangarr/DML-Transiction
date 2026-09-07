@@ -1,58 +1,380 @@
-# Salesforce DX Project
+# DML Transaction Tool – Post-Deployment Configuration Guide
 
-Salesforce DX is a development approach that brings source-driven development, team collaboration, and continuous integration to the Salesforce Platform. Instead of working directly in an org through a web browser, you work with metadata as source files in a local DX project, track changes in version control, and deploy through automated processes.
+## Overview
 
-This project template gets you started with the tools and structure you need to build Salesforce applications using source control, scratch orgs, and the Salesforce CLI.
+After installing the **DML Transaction Tool package**, a few post-deployment configurations are required to enable Salesforce Tooling API authentication.
 
-## Prerequisites
+This document explains how to configure:
 
-Before you start, make sure you have:
+* Connected App
+* Auth Provider
+* External Credential
+* External Credential Principal
+* Named Credential
+* Permission Set Access
+* Principal Authentication
 
-- **Salesforce CLI** - Download from [developer.salesforce.com/tools/salesforcecli](https://developer.salesforce.com/tools/salesforcecli). See [Install Salesforce CLI](https://developer.salesforce.com/docs/atlas.en-us.sfdx_setup.meta/sfdx_setup/sfdx_setup_install_cli.htm) for details.
-- **VS Code with Salesforce Extension Pack** - See [Installation Instructions](https://developer.salesforce.com/docs/platform/sfvscode-extensions/guide/install.html) for details. Includes the Agentforce Vibes extension.
-- **A development org** - Sign up for a free Developer Edition org [here](https://developer.salesforce.com/signup).
-- **Dev Hub enabled** (optional, required to create scratch orgs) - You can enable Dev Hub in your development org under Setup > Dev Hub.  See [Provide Developers Access to Salesforce DX Tools](https://developer.salesforce.com/docs/atlas.en-us.sfdx_dev.meta/sfdx_dev/sfdx_setup_dx_tools.htm).
+> **Important:** This configuration must be completed in the Salesforce org where the package is installed. The Named Credential URL should point to the **same target Salesforce org's instance/My Domain URL**.
 
-## Project Structure
+---
 
-Your DX project follows this structure:
+# Step 1: Create a Connected App
 
-- **`force-app/main/default/`** - Your metadata source files live in this default package directory. You can configure additional package directories in the `sfdx-project.json` file.
-- **`config/`** - Scratch org definitions and project settings
-- **`scripts/`** - Automation scripts for common tasks
-- **`sfdx-project.json`** - Project manifest that defines package directories, namespace, API version, and other project-level settings
+The Connected App is required to generate OAuth credentials for authentication.
 
-See [Salesforce DX Project Configuration](https://developer.salesforce.com/docs/atlas.en-us.sfdx_dev.meta/sfdx_dev/sfdx_dev_ws_config.htm).
+### 1. Navigate to App Manager
 
-## Get Started
+Go to:
 
-Ready to start developing? The [Get Started with Salesforce DX](https://developer.salesforce.com/docs/atlas.en-us.sfdx_dev.meta/sfdx_dev/sfdx_dev_get_started_dx.htm) guide walks you through your first project, from creating a scratch org to creating a simple Apex class or LWC to deploying your code to a sandbox.
+**Setup → App Manager**
 
-## Common Salesforce CLI Commands
+Click **New Connected App**.
 
-Here are common CLI commands that you'll use the most:
+### 2. Enter Basic Information
 
-- `sf org login web`: Authorize an org
-- `sf org open`: Open your org in a browser
-- `sf org create scratch`: Create a scratch org
-- `sf project deploy start`: Deploy metadata to your org
-- `sf project retrieve start`: Retrieve metadata from your org
-- `sf template generate <artifact>`: Scaffold new components, such as Apex classes and triggers, LWC components, Lightning apps, and more
-- `sf apex <command>`: Run Apex tests, run anonymous Apex blocks, and view logs
-- `sf data <command>`: Work with test data
-- `sf alias <command>`: Manage org aliases
-- `sf config <command>`: Configure CLI settings
+Fill in the following details:
 
-## Use Agentforce Vibes to Build Lightning Apps
+* **Connected App Name:** `DML Tooling App`
+* **API Name:** `DML_Tooling_App`
+* **Contact Email:** Enter the administrator's email address
 
-Transform your ideas into custom Lightning apps that extend CRM workflows directly in Lightning Experience. Through natural conversations with Agentforce Vibes, implement custom objects and fields, complex business logic, and dynamic UI components. See [Build a Lightning App Using Agentforce Vibes](https://developer.salesforce.com/docs/platform/einstein-for-devs/guide/lexapp-overview.html).
+### 3. Enable OAuth Settings
 
-## Additional Resources
+Enable:
 
-- [Agentforce Vibes Developer Guide](https://developer.salesforce.com/docs/platform/einstein-for-devs/guide/einstein-overview.html)
-- [Salesforce CLI Installation Guide](https://developer.salesforce.com/docs/atlas.en-us.sfdx_setup.meta/sfdx_setup/sfdx_setup_intro.htm)
-- [Salesforce DX Developer Guide](https://developer.salesforce.com/docs/atlas.en-us.sfdx_dev.meta/sfdx_dev/)
-- [Salesforce CLI Command Reference](https://developer.salesforce.com/docs/atlas.en-us.sfdx_cli_reference.meta/sfdx_cli_reference/)
-- [Salesforce CLI Plugin Development Guide](https://developer.salesforce.com/docs/platform/salesforce-cli-plugin/guide/conceptual-overview.html)
-- [Salesforce VS Code Extensions Documentation](https://developer.salesforce.com/tools/vscode/)
+**☑ Enable OAuth Settings**
 
+Initially, enter the following temporary Callback URL:
+
+`https://login.salesforce.com/services/oauth2/callback`
+
+### 4. Add OAuth Scopes
+
+Add the following OAuth scopes:
+
+* `Manage user data via APIs (api)`
+* `Perform requests at any time (refresh_token, offline_access)`
+
+### 5. Save the Connected App
+
+Click **Save** and then **Continue**.
+
+### 6. Get OAuth Credentials
+
+Click **Manage Consumer Details**.
+
+Complete the verification प्रक्रिया if prompted and copy the following values:
+
+* **Consumer Key**
+* **Consumer Secret**
+
+Keep these values सुरक्षित, as they will be required while creating the Auth Provider.
+
+---
+
+# Step 2: Create an Auth Provider
+
+The Auth Provider is used to configure the Salesforce OAuth authentication flow.
+
+### 1. Navigate to Auth Providers
+
+Go to:
+
+**Setup → Auth. Providers**
+
+Click **New**.
+
+### 2. Configure the Auth Provider
+
+Enter the following details:
+
+* **Provider Type:** `Salesforce`
+* **Name:** `DML Tooling Auth`
+* **URL Suffix:** `DMLToolingAuth`
+* **Consumer Key:** Paste the Consumer Key from Step 1
+* **Consumer Secret:** Paste the Consumer Secret from Step 1
+
+Use the following endpoints:
+
+**Authorize Endpoint URL:**
+
+`https://login.salesforce.com/services/oauth2/authorize`
+
+**Token Endpoint URL:**
+
+`https://login.salesforce.com/services/oauth2/token`
+
+**Default Scopes:**
+
+`api refresh_token`
+
+Click **Save**.
+
+### 3. Copy the Generated Callback URL
+
+After saving, scroll down to the **Salesforce Configuration** section.
+
+Copy the generated **Callback URL**.
+
+### 4. Update the Connected App
+
+Return to:
+
+**Setup → App Manager → DML Tooling App → Edit**
+
+Replace the temporary Callback URL with the Callback URL generated by the Auth Provider.
+
+Click **Save**.
+
+> **Note:** The Callback URL in the Connected App must exactly match the Callback URL generated by the Auth Provider.
+
+---
+
+# Step 3: Create an External Credential
+
+The External Credential manages the OAuth authentication configuration.
+
+### 1. Navigate to Named Credentials
+
+Go to:
+
+**Setup → Named Credentials**
+
+Open the **External Credentials** tab.
+
+Click **New**.
+
+### 2. Configure the External Credential
+
+Enter the following details:
+
+* **Label:** `DML Tooling External`
+* **Name:** `DML_Tooling_External`
+* **Authentication Protocol:** `OAuth 2.0`
+* **Authentication Flow Type:** `Browser Flow`
+* **Scope:** `api refresh_token`
+* **Identity Provider:** Select `DML Tooling Auth`
+
+Click **Save**.
+
+---
+
+# Step 4: Add an External Credential Principal
+
+The Principal defines the identity used for authentication.
+
+### 1. Open the External Credential
+
+Open:
+
+`DML Tooling External`
+
+### 2. Add a Principal
+
+Scroll to the **Principals** section and click **New**.
+
+Enter:
+
+* **Parameter Name:** `DML_Admin`
+* **Sequence Number:** `1`
+* **Identity Type:** `Named Principal`
+
+Click **Save**.
+
+---
+
+# Step 5: Create a Named Credential
+
+The Named Credential defines the endpoint used by the package for Tooling API callouts.
+
+### 1. Navigate to Named Credentials
+
+Go to:
+
+**Setup → Named Credentials**
+
+Click **New**.
+
+### 2. Configure the Named Credential
+
+Enter:
+
+* **Label:** `DML Tooling`
+* **Name:** `DML_Tooling`
+
+For the **URL**, enter the base URL of the Salesforce org where the package is installed.
+
+For example:
+
+`https://your-domain.my.salesforce.com`
+
+or use the org's specific instance/My Domain URL.
+
+> **Important:** Do not use a hardcoded URL from another Salesforce org. The URL must belong to the Salesforce org where the package is currently installed and configured.
+
+Select:
+
+* **External Credential:** `DML_Tooling_External`
+
+Enable:
+
+**☑ Generate Authorization Header**
+
+Click **Save**.
+
+---
+
+# Step 6: Configure Permission Set Access
+
+The user who will use the package must be granted access to the External Credential Principal.
+
+### 1. Create a Permission Set
+
+Go to:
+
+**Setup → Permission Sets**
+
+Click **New**.
+
+Enter:
+
+* **Label:** `DML Tooling Access`
+* **API Name:** `DML_Tooling_Access`
+
+Click **Save**.
+
+### 2. Grant External Credential Principal Access
+
+Open:
+
+**External Credential Principal Access**
+
+Click **Edit**.
+
+Add the following principal to **Enabled External Credential Principals**:
+
+`DML_Tooling_External - DML_Admin`
+
+Click **Save**.
+
+### 3. Assign the Permission Set
+
+Click:
+
+**Manage Assignments → Add Assignment**
+
+Select the user who needs access to the DML Transaction Tool.
+
+Click **Assign**.
+
+---
+
+# Step 7: Authenticate the Principal
+
+The final step is to authenticate the External Credential Principal.
+
+### 1. Navigate to External Credentials
+
+Go to:
+
+**Setup → Named Credentials → External Credentials**
+
+Open:
+
+`DML_Tooling_External`
+
+### 2. Authenticate
+
+In the **Principals** section, locate:
+
+`DML_Admin`
+
+Click the dropdown menu next to the principal and select:
+
+**Authenticate**
+
+### 3. Complete the Login
+
+A Salesforce login page will open.
+
+Log in using the Salesforce user account that should be authenticated.
+
+Click **Allow** to authorize the application.
+
+### 4. Verify Authentication
+
+After successful authorization, the Principal status should display:
+
+**Authenticated**
+
+---
+
+# Apex Callout Configuration
+
+After completing the post-deployment setup, the package can use the Named Credential for Tooling API callouts.
+
+Example:
+
+```apex
+req.setEndpoint(
+    'callout:DML_Tooling/services/data/v63.0/tooling/query/?q=' + encodedQuery
+);
+```
+
+The `DML_Tooling` Named Credential automatically handles:
+
+* Salesforce org endpoint configuration
+* OAuth authentication
+* Authorization header generation
+* Access token management
+
+---
+
+# Post-Deployment Verification Checklist
+
+Before using the DML Transaction Tool, verify the following:
+
+* [ ] Connected App has been created.
+* [ ] OAuth scopes have been configured correctly.
+* [ ] Consumer Key and Consumer Secret are configured in the Auth Provider.
+* [ ] Auth Provider Callback URL is updated in the Connected App.
+* [ ] External Credential has been created.
+* [ ] External Credential Principal has been added.
+* [ ] Named Credential points to the current Salesforce org's URL.
+* [ ] Generate Authorization Header is enabled.
+* [ ] Permission Set has External Credential Principal Access.
+* [ ] Permission Set is assigned to the required user.
+* [ ] External Credential Principal is successfully authenticated.
+* [ ] Tooling API callout has been tested successfully.
+
+---
+
+# Important Notes
+
+1. **Org-Specific URL Configuration**
+
+   The Named Credential URL must always point to the Salesforce org where the package is installed.
+
+   Do not hardcode a development or testing org URL inside the package configuration.
+
+2. **Authentication is User/Principal Dependent**
+
+   The authenticated Principal determines which Salesforce user identity is used for the Tooling API requests.
+
+3. **Permission Set Assignment**
+
+   Users who need access to the package functionality must have the required External Credential Principal access through the configured Permission Set.
+
+4. **Sandbox Consideration**
+
+   If the package is installed in a Sandbox environment, ensure that the authentication endpoints and login configuration are appropriate for that environment.
+
+5. **Security**
+
+   Consumer Secrets should never be exposed in Apex code, Lightning Web Components, or client-side JavaScript.
+
+---
+
+## Configuration Complete
+
+Once all the above steps are completed successfully, the DML Transaction Tool is ready to communicate with the Salesforce Tooling API using the configured Named Credential and OAuth authentication flow.
