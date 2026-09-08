@@ -1,12 +1,22 @@
 {
   "packageDirectories": [
     {
+      "versionName": "ver 0.1",
+      "versionNumber": "0.1.0.NEXT",
       "path": "force-app",
-      "default": true
+      "default": true,
+      "package": "DML Transaction Visualizer",
+      "versionDescription": "Salesforce Apex debug log and DML transaction visualizer"
     }
   ],
   "name": "dml visualizer",
   "namespace": "dmlviz",
   "sfdcLoginUrl": "https://login.salesforce.com",
-  "sourceApiVersion": "67.0"
+  "sourceApiVersion": "67.0",
+  "packageAliases": {
+    "DML Transaction Visualizer": "0Hog50000001EqXCAU",
+    "DML Transaction Visualizer@1.0.0-1": "04tNS000000YK7ZYAW",
+    "DML Transaction Visualizer@0.1.0-1": "04tg5000000E5MPAA0",
+    "DML Transaction Visualizer@0.1.0-2": "04tg5000000E6yPAAS"
+  }
 }
