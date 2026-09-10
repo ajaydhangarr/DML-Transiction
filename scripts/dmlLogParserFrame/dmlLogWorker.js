@@ -7,6 +7,7 @@ const BEGIN_END_MAP = {
   FLOW_START_INTERVIEW_BEGIN: "FLOW_START_INTERVIEW_END",
   FLOW_ELEMENT_BEGIN: "FLOW_ELEMENT_END",
   METHOD_ENTRY: "METHOD_EXIT",
+  SYSTEM_METHOD_ENTRY: "SYSTEM_METHOD_EXIT",
   WF_RULE_EVAL_BEGIN: "WF_RULE_EVAL_END",
   WF_CRITERIA_BEGIN: "WF_CRITERIA_END",
   WF_FLOW_ACTION_BEGIN: "WF_FLOW_ACTION_END"
@@ -77,6 +78,82 @@ function durationInMs(startNanos, endNanos) {
   return ((endNanos - startNanos) / 1000000).toFixed(2);
 }
 
+function classifyAsyncInvocation(eventType, detail) {
+  const text = String(detail || "").trim();
+  const lower = text.toLowerCase();
+  if (!text) return null;
+
+  if (lower.includes("system.enqueuejob") || lower.includes("enqueuejob")) {
+    return {
+      kind: "Queueable",
+      name: text.split("|").pop().trim() || "Queueable job"
+    };
+  }
+  if (
+    lower.includes("database.executebatch") ||
+    lower.includes("executebatch")
+  ) {
+    return {
+      kind: "Batch",
+      name: text.split("|").pop().trim() || "Batch job"
+    };
+  }
+  if (/future/i.test(text)) {
+    return { kind: "Future", name: text.split("|").pop().trim() };
+  }
+  if (/queueable/i.test(text)) {
+    return { kind: "Queueable", name: text.split("|").pop().trim() };
+  }
+  if (/batch(?:able)?/i.test(text)) {
+    return { kind: "Batch", name: text.split("|").pop().trim() };
+  }
+  if (eventType !== "METHOD_ENTRY") return null;
+  return null;
+}
+
+function futureCallCount(rawLine) {
+  const match = String(rawLine || "").match(
+    /Number of future calls:\s*(\d+)\s+out of/i
+  );
+  return match ? Number(match[1]) : 0;
+}
+
+function appendFutureCountNode(
+  stack,
+  rawLine,
+  eventNanos,
+  lineIndex,
+  sequence
+) {
+  const dmlIndex = stack.reduce(
+    (lastIndex, node, index) => (node.type === "DML_BEGIN" ? index : lastIndex),
+    -1
+  );
+  const dmlNode = dmlIndex >= 0 ? stack[dmlIndex] : null;
+  const parent = dmlNode ? stack[stack.length - 1] : null;
+  if (dmlNode?.futureCountAttached) return false;
+  if (!parent) return false;
+  dmlNode.futureCountAttached = true;
+
+  parent.children.push({
+    type: "ASYNC_FUTURE_INVOCATION",
+    raw: rawLine,
+    detail: "Future invocation detected from governor-limit usage.",
+    startNanos: eventNanos,
+    timestampStr: parseTimestampString(rawLine),
+    sequence: (sequence.value += 1),
+    startLine: lineIndex,
+    children: [],
+    asyncInvocation: {
+      kind: "Future",
+      name: "Future method name unavailable",
+      fromCount: true,
+      count: futureCallCount(rawLine)
+    }
+  });
+  return true;
+}
+
 function buildExecutionTree(rawLog) {
   if (!rawLog) {
     return { type: "ROOT", children: [], isTruncated: false };
@@ -86,7 +163,8 @@ function buildExecutionTree(rawLog) {
   const lines = rawLog.split(/\r?\n/);
   const root = { type: "ROOT", children: [], isTruncated };
   const stack = [root];
-  let sequence = 0;
+  const sequence = { value: 0 };
+  let futureCountAttached = false;
 
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const rawLine = lines[lineIndex];
@@ -133,8 +211,12 @@ function buildExecutionTree(rawLog) {
       detail: parts.slice(2).join("|"),
       startNanos: eventNanos,
       timestampStr: parseTimestampString(parts[0]),
-      sequence: (sequence += 1),
-      children: []
+      sequence: (sequence.value += 1),
+      children: [],
+      asyncInvocation: classifyAsyncInvocation(
+        eventType,
+        parts.slice(2).join("|")
+      )
     };
     stack[stack.length - 1].children.push(node);
 
@@ -176,7 +258,7 @@ async function buildExecutionTreeAsync(rawLog, options = {}) {
   const lines = rawLog.split(/\r?\n/);
   const root = { type: "ROOT", children: [], isTruncated };
   const stack = [root];
-  let sequence = 0;
+  const sequence = { value: 0 };
   const chunkSize = Math.max(250, options.chunkSize || 1000);
 
   for (let start = 0; start < lines.length; start += chunkSize) {
@@ -186,6 +268,17 @@ async function buildExecutionTreeAsync(rawLog, options = {}) {
       if ((index - start) % 250 === 0) throwIfAborted(options.signal);
       const rawLine = lines[index];
       if (!rawLine.trim()) continue;
+      const count = futureCallCount(rawLine);
+      if (count > 0) {
+        appendFutureCountNode(
+          stack,
+          rawLine,
+          parseTimestampNanos(rawLine),
+          index,
+          sequence,
+          count
+        );
+      }
       const parts = rawLine.split("|");
       if (parts.length < 2) continue;
 
@@ -233,9 +326,13 @@ async function buildExecutionTreeAsync(rawLog, options = {}) {
         detail: parts.slice(2).join("|"),
         startNanos: eventNanos,
         timestampStr: parseTimestampString(parts[0]),
-        sequence: (sequence += 1),
+        sequence: (sequence.value += 1),
         startLine: index,
-        children: []
+        children: [],
+        asyncInvocation: classifyAsyncInvocation(
+          eventType,
+          parts.slice(2).join("|")
+        )
       };
       stack[stack.length - 1].children.push(node);
       if (Object.prototype.hasOwnProperty.call(BEGIN_END_MAP, eventType)) {
@@ -389,7 +486,7 @@ function pruneEmptyNodes(node) {
     return node;
   }
 
-  if (WORK_EVENT_TYPES.has(node.type)) {
+  if (WORK_EVENT_TYPES.has(node.type) || node.asyncInvocation) {
     return node;
   }
 
@@ -1150,7 +1247,27 @@ function summarizeChildren(
     return [];
   }
 
-  const displayChildren = aggregateRepeatedActions(children);
+  const candidates = aggregateRepeatedActions(children);
+  const hasNamedQueueable = candidates.some(
+    (entry) =>
+      entry.node.asyncInvocation?.kind === "Queueable" &&
+      entry.node.type !== "SYSTEM_METHOD_ENTRY" &&
+      entry.node.asyncInvocation.name !== "System.enqueueJob"
+  );
+  const hasNamedFuture = candidates.some(
+    (entry) =>
+      entry.node.asyncInvocation?.kind === "Future" &&
+      !entry.node.asyncInvocation?.fromCount &&
+      entry.node.asyncInvocation.name
+  );
+  const displayChildren = candidates.filter(
+    (entry) =>
+      !(
+        hasNamedQueueable &&
+        entry.node.type === "SYSTEM_METHOD_ENTRY" &&
+        entry.node.asyncInvocation?.name === "System.enqueueJob"
+      ) && !(hasNamedFuture && entry.node.asyncInvocation?.fromCount)
+  );
   let lastValidationRule = previousValidationRule;
 
   return displayChildren.map((entry, idx) => {
@@ -1173,113 +1290,123 @@ function summarizeChildren(
       iconName: getIconName(c.type)
     };
 
-    switch (c.type) {
-      case "CODE_UNIT_STARTED": {
-        const unitName = codeUnitName(c);
-        if (c.detail && c.detail.includes("trigger")) {
-          base.label = "Trigger";
-          const phase = extractTriggerEventPhase(c.detail);
-          if (phase) {
-            base.eventPhase = phase;
-            base.phaseBadgeClass = phase.includes("BEFORE")
+    if (c.asyncInvocation) {
+      base.type = "ASYNC_APEX";
+      base.label = `${c.asyncInvocation.kind} Apex`;
+      base.name = c.asyncInvocation.name || `${c.asyncInvocation.kind} job`;
+      base.detail = c.asyncInvocation.fromCount
+        ? `Future invocation count detected: ${c.asyncInvocation.count}. The method name is not present in the parent log.`
+        : "Async Apex invocation detected in the parent transaction.";
+      base.iconName = "utility:apex";
+      base.badgeClass = "slds-badge slds-theme_info";
+    } else
+      switch (c.type) {
+        case "CODE_UNIT_STARTED": {
+          const unitName = codeUnitName(c);
+          if (c.detail && c.detail.includes("trigger")) {
+            base.label = "Trigger";
+            const phase = extractTriggerEventPhase(c.detail);
+            if (phase) {
+              base.eventPhase = phase;
+              base.phaseBadgeClass = phase.includes("BEFORE")
+                ? "phase-badge badge-before"
+                : "phase-badge badge-after";
+            }
+          } else if (/^Flow:/i.test(unitName)) {
+            base.label = "Record-Triggered Flow";
+            base.eventPhase = extractFlowEventPhase(c.detail);
+            base.phaseBadgeClass = base.eventPhase.includes("BEFORE")
               ? "phase-badge badge-before"
-              : "phase-badge badge-after";
+              : base.eventPhase.includes("AFTER")
+                ? "phase-badge badge-after"
+                : "phase-badge badge-flow";
+          } else if (/^Workflow:/i.test(unitName)) {
+            base.label = "Workflow";
+          } else if (/^SLA$/i.test(unitName)) {
+            base.label = "SLA Automation";
+          } else {
+            base.label = "Apex Code Unit";
           }
-        } else if (/^Flow:/i.test(unitName)) {
-          base.label = "Record-Triggered Flow";
-          base.eventPhase = extractFlowEventPhase(c.detail);
-          base.phaseBadgeClass = base.eventPhase.includes("BEFORE")
-            ? "phase-badge badge-before"
-            : base.eventPhase.includes("AFTER")
-              ? "phase-badge badge-after"
-              : "phase-badge badge-flow";
-        } else if (/^Workflow:/i.test(unitName)) {
-          base.label = "Workflow";
-        } else if (/^SLA$/i.test(unitName)) {
-          base.label = "SLA Automation";
-        } else {
-          base.label = "Apex Code Unit";
+          base.name = unitName;
+          break;
         }
-        base.name = unitName;
-        break;
+        case "SOQL_EXECUTE_BEGIN":
+          base.label = "SOQL Query";
+          base.name = c.detail.split("|").pop();
+          break;
+        case "SOSL_EXECUTE_BEGIN":
+          base.label = "SOSL Query";
+          base.name = c.detail.split("|").pop();
+          break;
+        case "FLOW_START_INTERVIEW_BEGIN":
+          base.label = "Flow Interview";
+          base.name = c.detail.split("|").pop();
+          break;
+        case "FLOW_ELEMENT_BEGIN":
+          base.label = "Flow Element";
+          base.name = c.detail.split("|").pop();
+          break;
+        case "FLOW_ELEMENT_ERROR":
+          base.label = "Flow Error";
+          base.name = c.detail;
+          base.badgeClass = "slds-badge slds-theme_error";
+          break;
+        case "USER_DEBUG":
+          base.label = "Debug Message";
+          base.name = c.detail;
+          base.badgeClass = "slds-badge slds-theme_info";
+          break;
+        case "DML_BEGIN": {
+          const nested = extractDmlOpDetails(c.detail);
+          base.label = "Nested DML";
+          base.name = `${nested.operation} ${nested.objectName} (${nested.rowCount} rows)`;
+          break;
+        }
+        case "VALIDATION_RULE":
+        case "VALIDATION_PASS":
+        case "VALIDATION_FAIL": {
+          const validation = parseValidationEventDetails(
+            c.type,
+            c.detail,
+            lastValidationRule
+          );
+          if (validation.ruleName) lastValidationRule = validation.ruleName;
+          base.validationRuleName = validation.ruleName;
+          base.validationStatus = validation.status;
+          base.validationDetail = validation.detail;
+          base.label = "Validation Rule";
+          base.name = validation.ruleName
+            ? `${validation.ruleName}${validation.detail ? ` — ${validation.detail}` : ""}`
+            : validation.detail || "Validation rule name unavailable";
+          break;
+        }
+        case "WF_FIELD_UPDATE":
+        case "WF_RULE_EVAL_BEGIN":
+          base.label = "Workflow Update";
+          base.name = c.detail.split("|").pop();
+          break;
+        case "WF_CRITERIA_BEGIN":
+          base.label = "Workflow Criteria";
+          base.name = c.detail.split("|").pop();
+          break;
+        case "WF_RULE_FILTER":
+          base.label = "Workflow Filter";
+          base.name = c.detail.split("|").pop();
+          break;
+        case "WF_FLOW_ACTION_BEGIN":
+          base.label = "Workflow Action";
+          base.name = c.detail.split("|").pop();
+          break;
+        case "EXCEPTION_THROWN":
+        case "FATAL_ERROR":
+          base.label = "Exception / Error";
+          base.name = c.detail;
+          base.badgeClass = "slds-badge slds-theme_error";
+          break;
+        default:
+          base.label = c.type.replace(/_/g, " ");
+          base.name = c.detail;
       }
-      case "SOQL_EXECUTE_BEGIN":
-        base.label = "SOQL Query";
-        base.name = c.detail.split("|").pop();
-        break;
-      case "SOSL_EXECUTE_BEGIN":
-        base.label = "SOSL Query";
-        base.name = c.detail.split("|").pop();
-        break;
-      case "FLOW_START_INTERVIEW_BEGIN":
-        base.label = "Flow Interview";
-        base.name = c.detail.split("|").pop();
-        break;
-      case "FLOW_ELEMENT_BEGIN":
-        base.label = "Flow Element";
-        base.name = c.detail.split("|").pop();
-        break;
-      case "FLOW_ELEMENT_ERROR":
-        base.label = "Flow Error";
-        base.name = c.detail;
-        base.badgeClass = "slds-badge slds-theme_error";
-        break;
-      case "USER_DEBUG":
-        base.label = "Debug Message";
-        base.name = c.detail;
-        base.badgeClass = "slds-badge slds-theme_info";
-        break;
-      case "DML_BEGIN": {
-        const nested = extractDmlOpDetails(c.detail);
-        base.label = "Nested DML";
-        base.name = `${nested.operation} ${nested.objectName} (${nested.rowCount} rows)`;
-        break;
-      }
-      case "VALIDATION_RULE":
-      case "VALIDATION_PASS":
-      case "VALIDATION_FAIL": {
-        const validation = parseValidationEventDetails(
-          c.type,
-          c.detail,
-          lastValidationRule
-        );
-        if (validation.ruleName) lastValidationRule = validation.ruleName;
-        base.validationRuleName = validation.ruleName;
-        base.validationStatus = validation.status;
-        base.validationDetail = validation.detail;
-        base.label = "Validation Rule";
-        base.name = validation.ruleName
-          ? `${validation.ruleName}${validation.detail ? ` — ${validation.detail}` : ""}`
-          : validation.detail || "Validation rule name unavailable";
-        break;
-      }
-      case "WF_FIELD_UPDATE":
-      case "WF_RULE_EVAL_BEGIN":
-        base.label = "Workflow Update";
-        base.name = c.detail.split("|").pop();
-        break;
-      case "WF_CRITERIA_BEGIN":
-        base.label = "Workflow Criteria";
-        base.name = c.detail.split("|").pop();
-        break;
-      case "WF_RULE_FILTER":
-        base.label = "Workflow Filter";
-        base.name = c.detail.split("|").pop();
-        break;
-      case "WF_FLOW_ACTION_BEGIN":
-        base.label = "Workflow Action";
-        base.name = c.detail.split("|").pop();
-        break;
-      case "EXCEPTION_THROWN":
-      case "FATAL_ERROR":
-        base.label = "Exception / Error";
-        base.name = c.detail;
-        base.badgeClass = "slds-badge slds-theme_error";
-        break;
-      default:
-        base.label = c.type.replace(/_/g, " ");
-        base.name = c.detail;
-    }
 
     if (entry.repeatCount > 1) {
       base.name = `${base.name || c.detail || c.type} x ${entry.repeatCount}`;

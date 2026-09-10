@@ -39,4 +39,39 @@ describe("dmlLogParser async Apex nodes", () => {
       "DmlVizQueueableProbe.DmlVizQueueableProbe(Id)"
     ]);
   });
+
+  it("keeps an unnamed Future node when only the parent future count is logged", async () => {
+    const rawLog = [
+      "10:00:00.000 (100)|EXECUTION_STARTED",
+      "10:00:00.001 (101)|CODE_UNIT_STARTED|[EXTERNAL]|execute_anonymous_apex",
+      "10:00:00.002 (102)|DML_BEGIN|[1]|Op:Insert|Type:Account|Rows:1",
+      "10:00:00.003 (103)|CODE_UNIT_STARTED|[1]|Account trigger event AfterInsert",
+      "10:00:00.004 (104)|LIMIT_USAGE_FOR_NS|(default)|",
+      "  Number of future calls: 1 out of 50",
+      "10:00:00.005 (105)|CODE_UNIT_FINISHED|Account trigger event AfterInsert",
+      "10:00:00.006 (106)|DML_END|[1]",
+      "10:00:00.007 (107)|EXECUTION_FINISHED"
+    ].join("\n");
+
+    const tree = await buildExecutionTreeAsync(rawLog);
+    const result = await extractDmlCardResult(tree, {
+      includeInferredUiSaves: false
+    });
+    const nodes = [];
+    const visit = (items) =>
+      (items || []).forEach((item) => {
+        nodes.push(item);
+        visit(item.children);
+      });
+    visit(result.cards[0]?.actions);
+
+    expect(nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "Future Apex",
+          name: "Future method name unavailable"
+        })
+      ])
+    );
+  });
 });

@@ -1,8 +1,8 @@
 {
   "packageDirectories": [
     {
-      "versionName": "ver 0.1",
-      "versionNumber": "0.1.0.NEXT",
+      "versionName": "Version 1.0",
+      "versionNumber": "1.0.0.NEXT",
       "path": "force-app",
       "default": true,
       "package": "DML Transaction Visualizer",
@@ -15,7 +15,7 @@
   "sourceApiVersion": "67.0",
   "packageAliases": {
     "DML Transaction Visualizer": "0Hog50000001EqXCAU",
-    "DML Transaction Visualizer@1.0.0-1": "04tNS000000YK7ZYAW",
+    "DML Transaction Visualizer@1.0.0-1": "04tg5000000E9xtAAC",
     "DML Transaction Visualizer@0.1.0-1": "04tg5000000E5MPAA0",
     "DML Transaction Visualizer@0.1.0-2": "04tg5000000E6yPAAS"
   }

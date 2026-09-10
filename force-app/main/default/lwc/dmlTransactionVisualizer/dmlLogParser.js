@@ -129,6 +129,50 @@ function classifyAsyncInvocation(eventType, detail) {
   return null;
 }
 
+function futureCallCount(rawLine) {
+  const match = String(rawLine || "").match(
+    /Number of future calls:\s*(\d+)\s+out of/i
+  );
+  return match ? Number(match[1]) : 0;
+}
+
+function appendFutureCountNode(
+  stack,
+  rawLine,
+  eventNanos,
+  lineIndex,
+  sequence,
+  count
+) {
+  const dmlIndex = stack.reduce(
+    (lastIndex, node, index) => (node.type === "DML_BEGIN" ? index : lastIndex),
+    -1
+  );
+  const dmlNode = dmlIndex >= 0 ? stack[dmlIndex] : null;
+  const parent = dmlNode ? stack[stack.length - 1] : null;
+  if (dmlNode?.futureCountAttached) return false;
+  if (!parent) return false;
+  dmlNode.futureCountAttached = true;
+
+  parent.children.push({
+    type: "ASYNC_FUTURE_INVOCATION",
+    raw: rawLine,
+    detail: "Future invocation detected from governor-limit usage.",
+    startNanos: eventNanos,
+    timestampStr: parseTimestampString(rawLine),
+    sequence: (sequence.value += 1),
+    startLine: lineIndex,
+    children: [],
+    asyncInvocation: {
+      kind: "Future",
+      name: "Future method name unavailable",
+      fromCount: true,
+      count
+    }
+  });
+  return true;
+}
+
 /**
  * Chunked variant used by the LWC for large logs. The synchronous version is
  * intentionally kept for the parser unit tests and small callers.
@@ -142,7 +186,7 @@ export async function buildExecutionTreeAsync(rawLog, options = {}) {
   const lines = rawLog.split(/\r?\n/);
   const root = { type: "ROOT", children: [], isTruncated };
   const stack = [root];
-  let sequence = 0;
+  const sequence = { value: 0 };
   const chunkSize = Math.max(250, options.chunkSize || 1000);
 
   for (let start = 0; start < lines.length; start += chunkSize) {
@@ -152,6 +196,17 @@ export async function buildExecutionTreeAsync(rawLog, options = {}) {
       if ((index - start) % 250 === 0) throwIfAborted(options.signal);
       const rawLine = lines[index];
       if (!rawLine.trim()) continue;
+      const count = futureCallCount(rawLine);
+      if (count > 0) {
+        appendFutureCountNode(
+          stack,
+          rawLine,
+          parseTimestampNanos(rawLine),
+          index,
+          sequence,
+          count
+        );
+      }
       const parts = rawLine.split("|");
       if (parts.length < 2) continue;
 
@@ -199,7 +254,7 @@ export async function buildExecutionTreeAsync(rawLog, options = {}) {
         detail: parts.slice(2).join("|"),
         startNanos: eventNanos,
         timestampStr: parseTimestampString(parts[0]),
-        sequence: (sequence += 1),
+        sequence: (sequence.value += 1),
         startLine: index,
         children: [],
         asyncInvocation: classifyAsyncInvocation(
@@ -1079,13 +1134,19 @@ function summarizeChildren(
       entry.node.type !== "SYSTEM_METHOD_ENTRY" &&
       entry.node.asyncInvocation.name !== "System.enqueueJob"
   );
+  const hasNamedFuture = candidates.some(
+    (entry) =>
+      entry.node.asyncInvocation?.kind === "Future" &&
+      !entry.node.asyncInvocation?.fromCount &&
+      entry.node.asyncInvocation.name
+  );
   const displayChildren = candidates.filter(
     (entry) =>
       !(
         hasNamedQueueable &&
         entry.node.type === "SYSTEM_METHOD_ENTRY" &&
         entry.node.asyncInvocation?.name === "System.enqueueJob"
-      )
+      ) && !(hasNamedFuture && entry.node.asyncInvocation?.fromCount)
   );
   let lastValidationRule = previousValidationRule;
 
@@ -1113,7 +1174,9 @@ function summarizeChildren(
       base.type = "ASYNC_APEX";
       base.label = `${c.asyncInvocation.kind} Apex`;
       base.name = c.asyncInvocation.name || `${c.asyncInvocation.kind} job`;
-      base.detail = "Async Apex invocation detected in the parent transaction.";
+      base.detail = c.asyncInvocation.fromCount
+        ? `Future invocation count detected: ${c.asyncInvocation.count}. The method name is not present in the parent log.`
+        : "Async Apex invocation detected in the parent transaction.";
       base.iconName = "utility:apex";
       base.badgeClass = "slds-badge slds-theme_info";
     } else
